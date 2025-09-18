@@ -75,6 +75,40 @@
         txt))
      (t nil))))
 
+;; Small, pure helpers for stream events --------------------------------------
+
+(defun acapella-ui--event-text-from-result (result)
+  "Return concatenated text from RESULT alist (message|artifact-update), or nil."
+  (let ((kind (acapella-util-jget result "kind")))
+    (cond
+     ((string= kind "message")
+      (let* ((parts (acapella-util-jget result "parts")))
+        (when parts
+          (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts ""))))
+     ((string= kind "artifact-update")
+      (let* ((art (acapella-util-jget result "artifact"))
+             (parts (and art (acapella-util-jget art "parts"))))
+        (when parts
+          (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts ""))))
+     (t nil))))
+
+(defun acapella-ui--event-final-p (result)
+  "Return non-nil if RESULT indicates final completion (status-update with completed state)."
+  (when (string= (acapella-util-jget result "kind") "status-update")
+    (let* ((status (acapella-util-jget result "status"))
+           (state  (and status (acapella-util-jget status "state")))
+           (final  (acapella-util-jget result "final")))
+      (and final (string= state "completed")))))
+
+(defun acapella-ui--on-stream-event (obj)
+  "Common handler: extract text from OBJ and append; append marker on final."
+  (let* ((result (and obj (acapella-util-jget obj "result")))
+         (txt    (and result (acapella-ui--event-text-from-result result))))
+    (when (and txt (not (string-empty-p txt)))
+      (acapella-ui--append txt))
+    (when (and result (acapella-ui--event-final-p result))
+      (acapella-ui--append-line " [final]" 'shadow))))
+
 ;;; Interactive commands -------------------------------------------------------
 
 ;;;###autoload
@@ -106,12 +140,11 @@
      (lambda (resp)
        (let ((err (acapella-util-jget resp "error")))
          (if err
-             (acapella-ui--append-line
-              (format "Error: %s" (acapella-util-jget err "message")) 'error)
+             (acapella-ui--append-line (acapella-ui--format-error err) 'error)
            (let ((txt (acapella-ui--extract-message-text resp)))
              (if (and txt (not (string-empty-p txt)))
                  (acapella-ui--append-line (format "Agent: %s" txt))
-               (acapella-ui--append-line "Agent: [no text]" 'shadow)))))))))
+               (acapella-ui--append-line "Agent: [no text]" 'shadow)))))) )))
 
 ;;;###autoload
 (defun acapella-stream-text (text)
@@ -126,31 +159,7 @@
           (acapella-a2a-stream
            profile text
            (lambda (obj)
-             ;; Try extract and append text incrementally (message or artifact-update)
-             (let ((result (acapella-util-jget obj "result")))
-               (cond
-                ;; message chunk
-                ((and result (string= (acapella-util-jget result "kind") "message"))
-                 (let* ((parts (acapella-util-jget result "parts"))
-                        (txt (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts "")))
-                   (when (and txt (not (string-empty-p txt)))
-                     (acapella-ui--append txt))))
-                ;; artifact-update chunk
-                ((and result (string= (acapella-util-jget result "kind") "artifact-update"))
-                 (let* ((art (acapella-util-jget result "artifact"))
-                        (parts (and art (acapella-util-jget art "parts")))
-                        (txt (when parts (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts ""))))
-                   (when (and txt (not (string-empty-p txt)))
-                     (acapella-ui--append txt))))
-                ;; status updates: show completed
-                ((and result (string= (acapella-util-jget result "kind") "status-update"))
-                 (let* ((status (acapella-util-jget result "status"))
-                        (state (and status (acapella-util-jget status "state")))
-                        (final (acapella-util-jget result "final")))
-                   (when (and final (string= state "completed"))
-                     (acapella-ui--append-line ""))))
-                (t ;; ignore other events, keep traffic in log
-                 ))))
+             (acapella-ui--on-stream-event obj))
            (lambda (_exit)
              (acapella-ui--append-line ""))))))
 
@@ -174,8 +183,7 @@
      (lambda (resp)
        (let ((err (acapella-util-jget resp "error")))
          (if err
-             (acapella-ui--append-line
-              (format "Error (get-task): %s" (acapella-util-jget err "message")) 'error)
+             (acapella-ui--append-line (acapella-ui--format-error err) 'error)
            (let* ((result (acapella-util-jget resp "result"))
                   (status (and result (acapella-util-jget result "status")))
                   (state  (and status (acapella-util-jget status "state"))))
@@ -193,8 +201,7 @@
      (lambda (resp)
        (let ((err (acapella-util-jget resp "error")))
          (if err
-             (acapella-ui--append-line
-              (format "Error (cancel): %s" (acapella-util-jget err "message")) 'error)
+             (acapella-ui--append-line (acapella-ui--format-error err) 'error)
            (acapella-ui--append-line (format "Cancel requested for %s" task-id) 'warning)))))))
 
 ;;;###autoload
@@ -209,26 +216,7 @@
           (acapella-a2a-resubscribe
            profile task-id
            (lambda (obj)
-             (let ((result (acapella-util-jget obj "result")))
-               (cond
-                ((and result (string= (acapella-util-jget result "kind") "message"))
-                 (let* ((parts (acapella-util-jget result "parts"))
-                        (txt (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts "")))
-                   (when (and txt (not (string-empty-p txt)))
-                     (acapella-ui--append txt))))
-                ((and result (string= (acapella-util-jget result "kind") "artifact-update"))
-                 (let* ((art (acapella-util-jget result "artifact"))
-                        (parts (and art (acapella-util-jget art "parts")))
-                        (txt (when parts (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts ""))))
-                   (when (and txt (not (string-empty-p txt)))
-                     (acapella-ui--append txt))))
-                ((and result (string= (acapella-util-jget result "kind") "status-update"))
-                 (let* ((status (acapella-util-jget result "status"))
-                        (state (and status (acapella-util-jget status "state")))
-                        (final (acapella-util-jget result "final")))
-                   (when (and final (string= state "completed"))
-                     (acapella-ui--append-line ""))))
-                (t))))
+             (acapella-ui--on-stream-event obj))
            (lambda (_exit)
              (acapella-ui--append-line ""))))))
 
@@ -279,6 +267,42 @@
            (goto-char (point-min))
            (view-mode 1)
            (pop-to-buffer (current-buffer))))))))
+
+(defun acapella-ui--format-error (err)
+  "Format ERR alist into a user-friendly string."
+  (let* ((code (acapella-util-jget err "code"))
+         (msg  (acapella-util-jget err "message"))
+         (data (acapella-util-jget err "data"))
+         (wa   (and data (acapella-util-jget data "www-authenticate"))))
+    (concat
+     (if (numberp code) (format "Error %s" code) "Error")
+     (when (and msg (not (string-empty-p msg))) (format ": %s" msg))
+     (when wa (format " (WWW-Authenticate: %s)" wa)))))
+
+;;;###autoload
+(defun acapella-toggle-extensions ()
+  "Toggle A2A Extensions header for the current profile (prompt for values when enabling)."
+  (interactive)
+  (let ((profile (acapella-ui--ensure-profile)))
+    (let* ((name (cdr (assq 'name profile)))
+           (ext  (cdr (assq 'extensions profile)))
+           (new-ext
+            (if ext
+                nil
+              (let ((s (read-string "Extensions (comma-separated URNs): ")))
+                (when (string-empty-p s) nil)
+                (mapcar #'string-trim (split-string s "," t))))))
+      (setq acapella-profiles
+            (mapcar (lambda (p)
+                      (if (string= (cdr (assq 'name p)) name)
+                          (let ((p2 (copy-sequence p)))
+                            (setq p2 (assq-delete-all 'extensions p2))
+                            (when new-ext (push (cons 'extensions new-ext) p2))
+                            p2)
+                        p))
+                    acapella-profiles))
+      (message "[Acapella] Extensions %s for profile %s"
+               (if new-ext "enabled" "disabled") name))))
 
 (provide 'acapella-ui)
 

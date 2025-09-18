@@ -36,7 +36,23 @@
       (let ((inhibit-read-only t))
         (insert (format-time-string "[%Y-%m-%d %H:%M:%S] "))
         (insert (apply #'format fmt args))
-        (insert "\n")))))
+        (insert "\n")
+        (acapella-transport--traffic-trim!)))))
+
+(defvar acapella-traffic-max-bytes 262144
+  "Maximum size (bytes) of the traffic buffer. Older logs are trimmed when exceeded.")
+
+(defun acapella-transport--traffic-trim! ()
+  "Trim the traffic buffer to `acapella-traffic-max-bytes' if it grows larger."
+  (when (and acapella-traffic-buffer acapella-traffic-max-bytes)
+    (with-current-buffer (get-buffer-create acapella-traffic-buffer)
+      (when (> (buffer-size) acapella-traffic-max-bytes)
+        (let ((inhibit-read-only t)
+              (excess (- (buffer-size) acapella-traffic-max-bytes)))
+          (goto-char (point-min))
+          (delete-region (point-min) (min (point-max) (+ excess 1)))
+          (goto-char (point-min))
+          (insert "[Acapella] ... trimmed older logs ...\n"))))))
 
 (defun acapella-transport-open-traffic ()
   "Open the transport traffic buffer."
@@ -46,6 +62,36 @@
 (defun acapella-transport--alist->headers (headers)
   "Convert HEADERS alist ((\"Name\" . \"Value\") ...) to list of strings \"Name: Value\"."
   (mapcar (lambda (kv) (format "%s: %s" (car kv) (cdr kv))) headers))
+
+(defun acapella-transport--parse-headers-from-string (header-region)
+  "Parse HEADER-REGION (string) into an alist of headers (NAME . VALUE)."
+  (let ((hdrs '()))
+    (dolist (l (split-string header-region "\r?\n" t))
+      (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*\\)\\'" l)
+        (push (cons (match-string 1 l) (match-string 2 l)) hdrs)))
+    (nreverse hdrs)))
+
+(defun acapella-transport--extract-content-type (headers)
+  "Return Content-Type value (string) from HEADERS alist, or nil."
+  (cdr (acapella-util-ci-header-find headers "Content-Type")))
+
+(defun acapella-transport--fmt-curl-headers (headers)
+  "Return flat list of \"-H\" and \"Name: Value\" pairs for curl from HEADERS alist."
+  (apply #'append
+         (mapcar (lambda (kv)
+                   (list "-H" (format "%s: %s" (car kv) (cdr kv))))
+                 headers)))
+
+(defun acapella-transport--curl-args (url headers data)
+  "Build curl ARGS for SSE POST to URL with HEADERS and DATA."
+  (append
+   (list "-sS" "-N" "--no-buffer")
+   ;; Always include SSE defaults
+   (acapella-transport--fmt-curl-headers
+    (append '(("Accept" . "text/event-stream")
+              ("Content-Type" . "application/json"))
+            headers))
+   (list "-X" "POST" "-d" data url)))
 
 (defun acapella-transport-http-post (url headers body on-done)
   "HTTP POST to URL with HEADERS alist and BODY string. ON-DONE gets (plist :status CODE :headers H :body S).
@@ -70,13 +116,13 @@ Asynchronous; ON-DONE called in a temporary buffer context."
          (goto-char (point-min))
          ;; Collect raw headers
          (when (re-search-forward "\r?\n\r?\n" nil t)
-           (let* ((header-region (buffer-substring (point-min) (match-beginning 0)))
-                  (lines (split-string header-region "\r?\n" t)))
-             (dolist (l lines)
-               (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*\\)\\'" l)
-                 (push (cons (match-string 1 l) (match-string 2 l)) hdrs)))))
+           (let ((header-region (buffer-substring (point-min) (match-beginning 0))))
+             (setq hdrs (acapella-transport--parse-headers-from-string header-region))))
          (let* ((body (buffer-substring-no-properties (point) (point-max)))
-                (resp (list :status code :headers (nreverse hdrs) :body body :error err)))
+                (resp (list :status code
+                            :headers hdrs
+                            :content-type (acapella-transport--extract-content-type hdrs)
+                            :body body :error err)))
            (acapella-transport--traffic-log "HTTP RESP %s code=%s len=%d err=%S"
                                             url code (length body) err)
            (funcall on-done resp))
@@ -134,13 +180,7 @@ Return an SSE handle object."
     (unless curl
       (user-error "[Acapella] curl not found. Please install curl for SSE"))
     (let* ((buf (generate-new-buffer " *acapella-sse*"))
-           (args (append
-                  (list "-sS" "-N" "--no-buffer"
-                        "-H" "Accept: text/event-stream"
-                        "-H" "Content-Type: application/json")
-                  (apply #'append (mapcar (lambda (kv) (list "-H" (format "%s: %s" (car kv) (cdr kv))))
-                                          headers))
-                  (list "-X" "POST" "-d" data url)))
+           (args (acapella-transport--curl-args url headers data))
            (proc (make-process
                   :name "acapella-sse"
                   :buffer buf
@@ -204,13 +244,7 @@ Increments retry counter and resets process/buffer/acc."
          (payload (acapella-transport-sse-payload handle))
          (headers (if last (cons (cons "Last-Event-ID" last) base-h) base-h))
          (buf (generate-new-buffer " *acapella-sse*"))
-         (args (append
-                (list "-sS" "-N" "--no-buffer"
-                      "-H" "Accept: text/event-stream"
-                      "-H" "Content-Type: application/json")
-                (apply #'append (mapcar (lambda (kv) (list "-H" (format "%s: %s" (car kv) (cdr kv))))
-                                        headers))
-                (list "-X" "POST" "-d" payload url)))
+         (args (acapella-transport--curl-args url headers payload))
          (proc (make-process
                 :name "acapella-sse"
                 :buffer buf
