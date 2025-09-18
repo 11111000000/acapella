@@ -38,6 +38,17 @@
   :type 'integer
   :group 'acapella-transport)
 
+(defcustom acapella-sse-reconnect-backoff 'exponential
+  "Backoff strategy for SSE auto-reconnect: 'linear or 'exponential."
+  :type '(choice (const :tag "Linear" linear)
+                 (const :tag "Exponential" exponential))
+  :group 'acapella-transport)
+
+(defcustom acapella-sse-reconnect-backoff-factor 2.0
+  "Backoff factor for SSE auto-reconnect when `acapella-sse-reconnect-backoff' is 'exponential."
+  :type 'number
+  :group 'acapella-transport)
+
 (defcustom acapella-traffic-buffer "*Acapella Traffic*"
   "Name of buffer to log transport events."
   :type 'string
@@ -96,6 +107,18 @@
          (mapcar (lambda (kv)
                    (list "-H" (format "%s: %s" (car kv) (cdr kv))))
                  headers)))
+
+(defun acapella-transport--reconnect-delay (attempt)
+  "Compute reconnect delay (seconds) for SSE based on ATTEMPT (1-based).
+Uses `acapella-sse-reconnect-backoff' and `acapella-sse-reconnect-delay-seconds'."
+  (max 0
+       (cond
+        ((eq acapella-sse-reconnect-backoff 'linear)
+         (* acapella-sse-reconnect-delay-seconds (max 1 attempt)))
+        (t ;; exponential by default
+         (truncate (* acapella-sse-reconnect-delay-seconds
+                      (expt (or acapella-sse-reconnect-backoff-factor 2.0)
+                            (max 0 (1- attempt)))))))))
 
 (defun acapella-transport--curl-args (url headers data)
   "Build curl ARGS for SSE POST to URL with HEADERS and DATA."
@@ -237,13 +260,14 @@ Return an SSE handle object."
              (when (and (not finished)
                         (acapella-transport-sse-auto-reconnect handle)
                         (< (or (acapella-transport-sse-retries handle) 0) acapella-sse-reconnect-max))
-               (acapella-transport--traffic-log "SSE RECONNECT scheduled after %ss (attempt %s/%s)"
-                                                acapella-sse-reconnect-delay-seconds
-                                                (1+ (or (acapella-transport-sse-retries handle) 0))
-                                                acapella-sse-reconnect-max)
-               (run-at-time
-                acapella-sse-reconnect-delay-seconds nil
-                #'acapella-transport--sse-reopen handle)))
+               (let* ((next-attempt (1+ (or (acapella-transport-sse-retries handle) 0)))
+                      (delay (acapella-transport--reconnect-delay next-attempt)))
+                 (acapella-transport--traffic-log "SSE RECONNECT scheduled after %ss (attempt %s/%s)"
+                                                  delay
+                                                  next-attempt
+                                                  acapella-sse-reconnect-max)
+                 (run-at-time delay nil
+                              #'acapella-transport--sse-reopen handle))))
            (when on-close
              (funcall on-close (list :exit event)))
            (when (buffer-live-p buf) (kill-buffer buf))))
@@ -292,8 +316,10 @@ Increments retry counter and resets process/buffer/acc."
          (when (and (not finished)
                     (acapella-transport-sse-auto-reconnect handle)
                     (< (or (acapella-transport-sse-retries handle) 0) acapella-sse-reconnect-max))
-           (run-at-time acapella-sse-reconnect-delay-seconds nil
-                        #'acapella-transport--sse-reopen handle)))
+           (let* ((next-attempt (1+ (or (acapella-transport-sse-retries handle) 0)))
+                  (delay (acapella-transport--reconnect-delay next-attempt)))
+             (run-at-time delay nil
+                          #'acapella-transport--sse-reopen handle))))
        (when (acapella-transport-sse-on-close handle)
          (funcall (acapella-transport-sse-on-close handle) (list :exit event)))
        (when (buffer-live-p buf) (kill-buffer buf))))))

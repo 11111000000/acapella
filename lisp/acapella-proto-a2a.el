@@ -330,9 +330,23 @@ Return chosen URL string or FALLBACK-URL."
         (or (alist-get "url" match nil nil #'string=) fallback-url)))
      (t fallback-url))))
 
+(defun acapella-a2a-validate-agent-card (agent-card)
+  "Validate minimal requirements of AGENT-CARD per A2A §5.6.
+Return nil if valid, or an error-shaped alist ((\"jsonrpc\" . \"2.0\") (\"error\" . ...)) if invalid."
+  (let* ((pref (alist-get "preferredTransport" agent-card nil nil #'string=))
+         (url  (alist-get "url" agent-card nil nil #'string=)))
+    (cond
+     ((not (stringp pref))
+      '(("jsonrpc" . "2.0")
+        ("error" . (("code" . -32006) ("message" . "Agent Card missing preferredTransport")))))
+     ((and (string= pref "JSONRPC") (not (stringp url)))
+      '(("jsonrpc" . "2.0")
+        ("error" . (("code" . -32006) ("message" . "Agent Card missing main url for JSONRPC")))))
+     (t nil))))
+
 (defun acapella-a2a-resolve-jsonrpc-url (profile on-result)
   "Fetch Agent Card for PROFILE and call ON-RESULT with chosen JSONRPC URL (string).
-Fallback to PROFILE :url on error."
+Fallback to PROFILE :url on error or invalid Agent Card."
   (let* ((fallback (acapella--profile-url profile)))
     (acapella-a2a-fetch-agent-card
      profile
@@ -340,7 +354,10 @@ Fallback to PROFILE :url on error."
        (let ((err (alist-get "error" card-or-error nil nil #'string=)))
          (if err
              (funcall on-result fallback)
-           (funcall on-result (acapella-a2a-select-jsonrpc-url card-or-error fallback))))))))
+           (let ((verr (acapella-a2a-validate-agent-card card-or-error)))
+             (if verr
+                 (funcall on-result fallback)
+               (funcall on-result (acapella-a2a-select-jsonrpc-url card-or-error fallback))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Authenticated Extended Agent Card (JSON-RPC)
@@ -361,9 +378,9 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object (may include 
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (funcall on-result
-                   (acapella-a2a--normalize-jsonrpc
-                    (acapella-a2a--http->jsonrpc resp #'identity)))))))))
+          (let ((obj (acapella-a2a--normalize-jsonrpc
+                      (acapella-a2a--http->jsonrpc resp #'identity))))
+            (funcall on-result obj))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: Push Notification Config (set/get/list/delete)

@@ -240,6 +240,22 @@
            (pop-to-buffer (current-buffer))))))))
 
 ;;;###autoload
+(defun acapella-validate-agent-card ()
+  "Validate Agent Card for current profile and show result."
+  (interactive)
+  (let ((profile (acapella-ui--ensure-profile)))
+    (acapella-a2a-fetch-agent-card
+     profile
+     (lambda (obj)
+       (let ((err (and (not (alist-get "error" obj nil nil #'string=))
+                       (acapella-a2a-validate-agent-card obj))))
+         (if (or (alist-get "error" obj nil nil #'string=) err)
+             (message "[Acapella] Agent Card invalid: %s"
+                      (or (and err (alist-get "message" (alist-get "error" err nil nil #'string=) nil nil #'string=))
+                          (alist-get "message" (alist-get "error" obj nil nil #'string=) nil nil #'string=)))
+           (message "[Acapella] Agent Card looks valid")))))))
+
+;;;###autoload
 (defun acapella-resolve-agent-url ()
   "Resolve JSON-RPC URL via Agent Card and show it."
   (interactive)
