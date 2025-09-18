@@ -17,6 +17,7 @@
 (require 'url)
 (require 'json)
 (require 'subr-x)
+(require 'acapella-util)
 
 (defgroup acapella-transport nil
   "Transport layer for Acapella."
@@ -57,9 +58,7 @@ Asynchronous; ON-DONE called in a temporary buffer context."
                                      (mapconcat (lambda (kv)
                                                   (format "%s: %s"
                                                           (car kv)
-                                                          (if (string= (downcase (car kv)) "authorization")
-                                                              "****"
-                                                            (cdr kv))))
+                                                          (acapella-util-mask-header (car kv) (cdr kv))))
                                                 headers ", ")
                                      (length body))
     (url-retrieve
@@ -153,8 +152,7 @@ Return an SSE handle object."
                                        (mapconcat (lambda (kv)
                                                     (format "%s: %s"
                                                             (car kv)
-                                                            (if (string= (downcase (car kv)) "authorization")
-                                                                "****" (cdr kv))))
+                                                            (acapella-util-mask-header (car kv) (cdr kv))))
                                                   headers ", ")
                                        (length data))
       (let ((handle (acapella-transport--make-sse
@@ -271,9 +269,7 @@ Asynchronous; ON-DONE called in a temporary buffer context."
                                      (mapconcat (lambda (kv)
                                                   (format "%s: %s"
                                                           (car kv)
-                                                          (if (string= (downcase (car kv)) "authorization")
-                                                              "****"
-                                                            (cdr kv))))
+                                                          (acapella-util-mask-header (car kv) (cdr kv))))
                                                 headers ", "))
     (url-retrieve
      url

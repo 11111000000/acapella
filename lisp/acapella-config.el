@@ -14,6 +14,7 @@
 
 (require 'auth-source)
 (require 'subr-x)
+(require 'acapella-util)
 
 (defgroup acapella nil
   "Acapella — Emacs client for agent protocols (A2A-first)."
@@ -118,11 +119,8 @@ Reconnect uses Last-Event-ID if available."
       (user-error "[Acapella] Profile missing :url")))
 
 (defun acapella--mask-header (name value)
-  "Return masked VALUE for header NAME for logging."
-  (if (and (stringp name)
-           (string-match-p (rx bos (or "authorization" "x-api-key") eos) (downcase name)))
-      (concat (substring value 0 (min 8 (length value))) "…")
-    value))
+  "Return masked VALUE for header NAME for logging (delegates to util)."
+  (acapella-util-mask-header name value))
 
 (provide 'acapella-config)
 

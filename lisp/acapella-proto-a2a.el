@@ -14,6 +14,7 @@
 
 (require 'json)
 (require 'subr-x)
+(require 'acapella-util)
 (require 'acapella-config)
 (require 'acapella-transport)
 
@@ -46,7 +47,7 @@
 
 (defun acapella-a2a--http->jsonrpc (resp on-success)
   "Normalize HTTP RESP to JSON-RPC-like object. If 2xx, parse and call ON-SUCCESS with alist.
-On error, return ((\"jsonrpc\" . \"2.0\") (\"error\" . ((\"code\" . -HTTP) (\"message\" . ... ) ...)))."
+On error, return JSON-RPC-shaped error alist including WWW-Authenticate when present."
   (let ((status (plist-get resp :status))
         (body   (plist-get resp :body))
         (hdrs   (plist-get resp :headers)))
@@ -56,12 +57,105 @@ On error, return ((\"jsonrpc\" . \"2.0\") (\"error\" . ((\"code\" . -HTTP) (\"me
           (error `(("jsonrpc" . "2.0")
                    ("error" . (("code" . -32700)
                                ("message" . ,(error-message-string err)))))))
-      (let* ((wa (cdr (acapella-a2a--find-header hdrs "WWW-Authenticate"))))
+      (let* ((wa (cdr (acapella-util-ci-header-find hdrs "WWW-Authenticate"))))
         `(("jsonrpc" . "2.0")
           ("error" . (("code" . ,(- (or status 0)))
                       ("message" . ,(format "HTTP error %s" status))
                       ,@(when wa `(("data" . (("www-authenticate" . ,wa))))))))))))
 
+
+;; JSON-RPC error normalization ------------------------------------------------
+
+(defun acapella-a2a--normalize-jsonrpc-error (err)
+  "Return normalized JSON-RPC ERR alist with friendlier message for known codes."
+  (let* ((code (alist-get "code" err nil nil #'string=))
+         (msg  (alist-get "message" err nil nil #'string=))
+         (friendly
+          (cond
+           ((eq code -32700) "Malformed JSON received from server")
+           ((eq code -32600) "Invalid JSON-RPC request")
+           ((eq code -32601) "Method not found on server")
+           ((eq code -32602) "Invalid params")
+           ((eq code -32603) "Internal error on server")
+           ;; A2A typical domain codes (-32000..-32099)
+           ((eq code -32001) "Invalid input (A2A)")
+           ((eq code -32002) "Unauthorized (A2A)")
+           ((eq code -32003) "Forbidden (A2A)")
+           ((eq code -32004) "Not Found (A2A)")
+           ((eq code -32005) "Conflict (A2A)")
+           ((eq code -32006) "Rate limited (A2A)")
+           ((eq code -32007) "Service unavailable (A2A)")
+           ;; HTTP mapped as negative status
+           ((and (numberp code) (< code 0))
+            (format "HTTP error %d" (- code)))
+           (t nil))))
+    (if friendly
+        (let ((out (copy-sequence err)))
+          (setf (alist-get "message" out nil nil #'string=)
+                (if (and msg (not (string-empty-p msg)))
+                    (format "%s: %s" friendly msg)
+                  friendly))
+          out)
+      err)))
+
+(defun acapella-a2a--normalize-jsonrpc (obj)
+  "Normalize JSON-RPC OBJ alist: map error codes to friendly messages."
+  (let ((err (alist-get "error" obj nil nil #'string=)))
+    (if err
+        (let ((norm (acapella-a2a--normalize-jsonrpc-error err)))
+          (let ((out (copy-sequence obj)))
+            (setf (alist-get "error" out nil nil #'string=) norm)
+            out))
+      obj)))
+
+;; Generic small helpers for JSON-RPC calls and SSE streams --------------------
+
+(defun acapella-a2a--json-headers (profile)
+  "Return JSON headers for PROFILE: Content-Type + auth + extensions."
+  (append '(("Content-Type" . "application/json"))
+          (acapella--headers-with-auth-and-ext profile)))
+
+(defun acapella-a2a--sse-headers (profile)
+  "Return SSE headers for PROFILE: Accept + Content-Type + auth + extensions."
+  (append '(("Accept" . "text/event-stream")
+            ("Content-Type" . "application/json"))
+          (acapella--headers-with-auth-and-ext profile)))
+
+(defun acapella-a2a--rpc-call (profile method params on-result)
+  "Small orchestrator: resolve URL, build envelope and call HTTP POST.
+Calls ON-RESULT with normalized JSON-RPC object."
+  (acapella-a2a--with-jsonrpc-url
+   profile
+   (lambda (url)
+     (let* ((headers (acapella-a2a--json-headers profile))
+            (payload (acapella-a2a--json
+                      (acapella-a2a--rpc-envelope method params))))
+       (acapella-transport-http-post
+        url headers payload
+        (lambda (resp)
+          (funcall on-result
+                   (acapella-a2a--normalize-jsonrpc
+                    (acapella-a2a--http->jsonrpc resp #'identity)))))))))
+
+(defun acapella-a2a--rpc-stream (profile method params on-event on-close)
+  "Small orchestrator for SSE: resolve URL, build envelope and open stream.
+Parses JSON per SSE data and calls ON-EVENT with decoded object, ignoring corrupt chunks."
+  (acapella-a2a--with-jsonrpc-url
+   profile
+   (lambda (url)
+     (let* ((headers (acapella-a2a--sse-headers profile))
+            (payload (acapella-a2a--json
+                      (acapella-a2a--rpc-envelope method params))))
+       (acapella-transport-sse-open
+        url headers payload
+        (lambda (ev)
+          (let ((data (plist-get ev :data)))
+            (when (and (stringp data) (not (string-empty-p data)))
+              (condition-case _
+                  (funcall on-event (acapella-a2a--parse-json data))
+                (error
+                 (acapella-transport--traffic-log "SSE JSON parse error, raw=%s" data))))))
+        on-close)))))
 
 ;; Helper: resolve JSON-RPC URL (Agent Card if configured) ---------------------
 
@@ -76,121 +170,52 @@ If PROFILE has 'agent-card-url', resolve via Agent Card; otherwise use :url."
 ;; Public API ------------------------------------------------------------------
 
 (defun acapella-a2a-send (profile text on-result)
-  "Send TEXT via A2A message/send using PROFILE (alist). Call ON-RESULT with parsed JSON-RPC response alist.
-ON-RESULT is called once with the decoded JSON object."
-  (acapella-a2a--with-jsonrpc-url
+  "Send TEXT via A2A message/send using PROFILE (alist).
+ON-RESULT is called once with decoded JSON object."
+  (acapella-a2a--rpc-call
    profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "message/send"
-                       `(("message" . ,(acapella-a2a--text-message text))
-                         ("metadata" . ,(make-hash-table :test 'equal)))))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+   "message/send"
+   `(("message" . ,(acapella-a2a--text-message text))
+     ("metadata" . ,(make-hash-table :test 'equal)))
+   on-result))
 
 (defun acapella-a2a-stream (profile text on-event on-close)
   "Stream TEXT via A2A message/stream using PROFILE.
-ON-EVENT called with decoded JSON-RPC response alist for every SSE data event.
-ON-CLOSE called with plist (:exit STRING).
-Return an SSE handle."
-  (acapella-a2a--with-jsonrpc-url
+Return SSE handle. ON-EVENT gets decoded JSON object per chunk; ON-CLOSE gets (:exit STRING)."
+  (acapella-a2a--rpc-stream
    profile
-   (lambda (url)
-     (let* ((headers (append '(("Accept" . "text/event-stream")
-                               ("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "message/stream"
-                       `(("message" . ,(acapella-a2a--text-message text))
-                         ("metadata" . ,(make-hash-table :test 'equal)))))))
-       (acapella-transport-sse-open
-        url headers payload
-        (lambda (ev)
-          (let ((data (plist-get ev :data)))
-            (when (and (stringp data) (not (string-empty-p data)))
-              (condition-case _
-                  (funcall on-event (acapella-a2a--parse-json data))
-                (error
-                 ;; ignore individual corrupt events, but still show raw traffic
-                 (acapella-transport--traffic-log "SSE JSON parse error, raw=%s" data))))))
-        on-close)))))
+   "message/stream"
+   `(("message" . ,(acapella-a2a--text-message text))
+     ("metadata" . ,(make-hash-table :test 'equal)))
+   on-event on-close))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: tasks/get and tasks/cancel (JSON-RPC)
 
 (defun acapella-a2a-get-task (profile task-id on-result)
-  "Call A2A JSON-RPC method tasks/get using PROFILE for TASK-ID.
-ON-RESULT is called once with parsed JSON alist (or error object)."
+  "Call A2A JSON-RPC method tasks/get using PROFILE for TASK-ID."
   (unless (and (stringp task-id) (not (string-empty-p task-id)))
     (user-error "[Acapella] Task ID is required"))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/get"
-                       `(("taskId" . ,task-id))))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+  (acapella-a2a--rpc-call
+   profile "tasks/get" `(("taskId" . ,task-id)) on-result))
 
 (defun acapella-a2a-cancel (profile task-id on-result)
-  "Call A2A JSON-RPC method tasks/cancel using PROFILE for TASK-ID.
-ON-RESULT is called once with parsed JSON alist (or error object)."
+  "Call A2A JSON-RPC method tasks/cancel using PROFILE for TASK-ID."
   (unless (and (stringp task-id) (not (string-empty-p task-id)))
     (user-error "[Acapella] Task ID is required"))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/cancel"
-                       `(("taskId" . ,task-id))))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+  (acapella-a2a--rpc-call
+   profile "tasks/cancel" `(("taskId" . ,task-id)) on-result))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: tasks/resubscribe (SSE)
 
 (defun acapella-a2a-resubscribe (profile task-id on-event on-close)
   "Resume SSE stream for TASK-ID via A2A tasks/resubscribe using PROFILE.
-ON-EVENT called with decoded JSON-RPC response alist per SSE data.
-ON-CLOSE called with plist (:exit STRING). Return SSE handle."
+Return SSE handle."
   (unless (and (stringp task-id) (not (string-empty-p task-id)))
     (user-error "[Acapella] Task ID is required"))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Accept" . "text/event-stream")
-                               ("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/resubscribe"
-                       `(("taskId" . ,task-id))))))
-       (acapella-transport-sse-open
-        url headers payload
-        (lambda (ev)
-          (let ((data (plist-get ev :data)))
-            (when (and (stringp data) (not (string-empty-p data)))
-              (condition-case _
-                  (funcall on-event (acapella-a2a--parse-json data))
-                (error
-                 (acapella-transport--traffic-log "SSE JSON parse error (resubscribe), raw=%s" data))))))
-        on-close)))))
+  (acapella-a2a--rpc-stream
+   profile "tasks/resubscribe" `(("taskId" . ,task-id)) on-event on-close))
 
 ;; ---------------------------------------------------------------------------
 ;; Agent Card: fetch + transport selection (JSONRPC)
@@ -238,7 +263,39 @@ When present, returns plist (:fetched TIME :card ALIST)."
 
 (defun acapella-a2a--find-header (headers name)
   "Find header NAME (case-insensitive) in HEADERS alist, return cons or nil."
-  (seq-find (lambda (kv) (string= (downcase (car kv)) (downcase name))) headers))
+  (acapella-util-ci-header-find headers name))
+
+;; Small helpers for Agent Card HTTP fetch and handling
+(defun acapella-a2a--card-headers (profile)
+  "Headers for Agent Card fetch: Accept + auth."
+  (append '(("Accept" . "application/json"))
+          (acapella--headers-with-auth profile)))
+
+(defun acapella-a2a--handle-card-http-response (profile resp on-result)
+  "Parse RESP for Agent Card; on success cache and return card, else fallback to cache or error."
+  (let ((status (plist-get resp :status))
+        (body   (plist-get resp :body)))
+    (if (and status (>= status 200) (< status 300))
+        (condition-case err
+            (let ((card (acapella-a2a--parse-json body)))
+              (acapella-a2a--cache-put-card profile card)
+              (funcall on-result card))
+          (error (funcall on-result `(("jsonrpc" . "2.0")
+                                      ("error" . (("code" . -32700)
+                                                  ("message" . ,(error-message-string err))))))))
+      (let* ((cached (acapella-a2a--cache-get-card profile))
+             (card (plist-get cached :card)))
+        (if card
+            (funcall on-result card)
+          (funcall on-result `(("jsonrpc" . "2.0")
+                               ("error" . (("code" . ,(- status))
+                                           ("message" . ,(format "HTTP error %s fetching Agent Card" status)))))))))))
+
+(defun acapella-a2a--fetch-card-http (profile url on-result)
+  "HTTP GET Agent Card at URL for PROFILE and call ON-RESULT with parsed card or error."
+  (acapella-transport-http-get
+   url (acapella-a2a--card-headers profile)
+   (lambda (resp) (acapella-a2a--handle-card-http-response profile resp on-result))))
 
 (defun acapella-a2a-fetch-agent-card (profile on-result)
   "Fetch Agent Card JSON for PROFILE and call ON-RESULT with parsed alist or error JSON-RPC-like object.
@@ -249,29 +306,7 @@ Uses in-memory TTL cache. On HTTP error, returns cached card if available (even 
     (let* ((cached (acapella-a2a--cache-get-card profile)))
       (if (acapella-a2a--cache-fresh-p cached)
           (funcall on-result (plist-get cached :card))
-        (let ((headers (append '(("Accept" . "application/json"))
-                               (acapella--headers-with-auth profile))))
-          (acapella-transport-http-get
-           card-url headers
-           (lambda (resp)
-             (let ((status (plist-get resp :status))
-                   (body   (plist-get resp :body)))
-               (if (and status (>= status 200) (< status 300))
-                   (condition-case err
-                       (let ((card (acapella-a2a--parse-json body)))
-                         (acapella-a2a--cache-put-card profile card)
-                         (funcall on-result card))
-                     (error (funcall on-result `(("jsonrpc" . "2.0")
-                                                 ("error" . (("code" . -32700)
-                                                             ("message" . ,(error-message-string err))))))))
-                 ;; HTTP error: if we have any cached card (even stale), return it; else error
-                 (let* ((cached (acapella-a2a--cache-get-card profile))
-                        (card (plist-get cached :card)))
-                   (if card
-                       (funcall on-result card)
-                     (funcall on-result `(("jsonrpc" . "2.0")
-                                          ("error" . (("code" . ,(- status))
-                                                      ("message" . ,(format "HTTP error %s fetching Agent Card" status)))))))))))))))))
+        (acapella-a2a--fetch-card-http profile card-url on-result)))))
 
 (defun acapella-a2a-select-jsonrpc-url (agent-card &optional fallback-url)
   "Given AGENT-CARD (alist), pick JSONRPC URL per A2A §5.6.
@@ -325,24 +360,12 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object (may include 
 ;; A2A: Push Notification Config (set/get/list/delete)
 
 (defun acapella-a2a-push-set (profile config on-result)
-  "Set push notification CONFIG for a task via A2A tasks/pushNotificationConfig/set.
-CONFIG is an alist representing TaskPushNotificationConfig (must include \"taskId\").
-Call ON-RESULT with parsed JSON-RPC response."
+  "Set push notification CONFIG for a task via A2A tasks/pushNotificationConfig/set."
   (let ((task-id (alist-get "taskId" config nil nil #'string=)))
     (unless (and (stringp task-id) (not (string-empty-p task-id)))
       (user-error "[Acapella] config.taskId is required")))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/pushNotificationConfig/set" config))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+  (acapella-a2a--rpc-call
+   profile "tasks/pushNotificationConfig/set" config on-result))
 
 (defun acapella-a2a-push-get (profile task-id config-id on-result)
   "Get push notification config for TASK-ID and CONFIG-ID via A2A tasks/pushNotificationConfig/get."
@@ -350,37 +373,17 @@ Call ON-RESULT with parsed JSON-RPC response."
     (user-error "[Acapella] task-id is required"))
   (unless (and (stringp config-id) (not (string-empty-p config-id)))
     (user-error "[Acapella] config-id is required"))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (params `(("taskId" . ,task-id) ("configId" . ,config-id)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/pushNotificationConfig/get" params))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+  (acapella-a2a--rpc-call
+   profile "tasks/pushNotificationConfig/get"
+   `(("taskId" . ,task-id) ("configId" . ,config-id))
+   on-result))
 
 (defun acapella-a2a-push-list (profile task-id on-result)
   "List push notification configs for TASK-ID via A2A tasks/pushNotificationConfig/list."
   (unless (and (stringp task-id) (not (string-empty-p task-id)))
     (user-error "[Acapella] task-id is required"))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (params `(("taskId" . ,task-id)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/pushNotificationConfig/list" params))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+  (acapella-a2a--rpc-call
+   profile "tasks/pushNotificationConfig/list" `(("taskId" . ,task-id)) on-result))
 
 (defun acapella-a2a-push-delete (profile task-id config-id on-result)
   "Delete push notification config CONFIG-ID for TASK-ID via A2A tasks/pushNotificationConfig/delete."
@@ -388,29 +391,18 @@ Call ON-RESULT with parsed JSON-RPC response."
     (user-error "[Acapella] task-id is required"))
   (unless (and (stringp config-id) (not (string-empty-p config-id)))
     (user-error "[Acapella] config-id is required"))
-  (acapella-a2a--with-jsonrpc-url
-   profile
-   (lambda (url)
-     (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth-and-ext profile)))
-            (params `(("taskId" . ,task-id) ("configId" . ,config-id)))
-            (payload (acapella-a2a--json
-                      (acapella-a2a--rpc-envelope
-                       "tasks/pushNotificationConfig/delete" params))))
-       (acapella-transport-http-post
-        url headers payload
-        (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+  (acapella-a2a--rpc-call
+   profile "tasks/pushNotificationConfig/delete"
+   `(("taskId" . ,task-id) ("configId" . ,config-id))
+   on-result))
+
+(defun acapella-a2a-clear-agent-card-cache (&optional profile)
+  "Clear Agent Card in-memory cache. If PROFILE non-nil, clear only its entry."
+  (if profile
+      (let ((key (acapella-a2a--cache-key profile)))
+        (when key (remhash key acapella-a2a--agent-card-cache)))
+    (clrhash acapella-a2a--agent-card-cache))
+  t)
 
 (provide 'acapella-proto-a2a)
 
