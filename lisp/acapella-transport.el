@@ -65,8 +65,11 @@
         (insert "\n")
         (acapella-transport--traffic-trim!)))))
 
-(defvar acapella-traffic-max-bytes 262144
-  "Maximum size (bytes) of the traffic buffer. Older logs are trimmed when exceeded.")
+(defcustom acapella-traffic-max-bytes 262144
+  "Maximum size (in bytes) of the traffic buffer.
+When the buffer exceeds this size, older log lines are trimmed."
+  :type 'integer
+  :group 'acapella-transport)
 
 (defun acapella-transport--traffic-trim! ()
   "Trim the traffic buffer to `acapella-traffic-max-bytes' if it grows larger."
@@ -181,7 +184,8 @@ Asynchronous; ON-DONE called in a temporary buffer context."
   payload
   last-id
   retries
-  auto-reconnect)
+  auto-reconnect
+  server-retry-ms)
 
 (defun acapella-transport--parse-sse-events (acc chunk)
   "Accumulate CHUNK into ACC string and return (cons NEW-ACC events-list).
@@ -242,6 +246,13 @@ Return an SSE handle object."
         (set-process-filter
          proc
          (lambda (_proc chunk)
+           ;; Capture server-provided retry: N (ms) hints if present
+           (let ((start 0))
+             (while (string-match "^[ \t]*retry:[ \t]*\\([0-9]+\\)" chunk start)
+               (let ((ms (string-to-number (match-string 1 chunk))))
+                 (when (> ms 0)
+                   (setf (acapella-transport-sse-server-retry-ms handle) ms)))
+               (setq start (match-end 0))))
            (pcase-let* ((`(,acc2 . ,events) (acapella-transport--parse-sse-events (acapella-transport-sse-acc handle) chunk)))
              (setf (acapella-transport-sse-acc handle) acc2)
              (dolist (ev events)
@@ -256,20 +267,27 @@ Return an SSE handle object."
          proc
          (lambda (_proc event)
            (acapella-transport--traffic-log "SSE CLOSE %s %s" url (string-trim event))
-           (let ((finished (string-match-p (rx (or "finished" "done")) event)))
-             (when (and (not finished)
-                        (acapella-transport-sse-auto-reconnect handle)
-                        (< (or (acapella-transport-sse-retries handle) 0) acapella-sse-reconnect-max))
-               (let* ((next-attempt (1+ (or (acapella-transport-sse-retries handle) 0)))
-                      (delay (acapella-transport--reconnect-delay next-attempt)))
-                 (acapella-transport--traffic-log "SSE RECONNECT scheduled after %ss (attempt %s/%s)"
-                                                  delay
-                                                  next-attempt
-                                                  acapella-sse-reconnect-max)
-                 (run-at-time delay nil
-                              #'acapella-transport--sse-reopen handle))))
-           (when on-close
-             (funcall on-close (list :exit event)))
+           (let* ((finished (string-match-p (rx (or "finished" "done")) event))
+                  (can-reconnect (and (not finished)
+                                      (acapella-transport-sse-auto-reconnect handle)
+                                      (< (or (acapella-transport-sse-retries handle) 0)
+                                         acapella-sse-reconnect-max)))
+                  (next-attempt (and can-reconnect
+                                     (1+ (or (acapella-transport-sse-retries handle) 0))))
+                  (server-ms (acapella-transport-sse-server-retry-ms handle))
+                  (delay (and next-attempt
+                              (if (and server-ms (> server-ms 0))
+                                  (/ server-ms 1000.0)
+                                (acapella-transport--reconnect-delay next-attempt)))))
+             (when can-reconnect
+               (acapella-transport--traffic-log "SSE RECONNECT scheduled after %ss (attempt %s/%s)"
+                                                delay next-attempt acapella-sse-reconnect-max)
+               (run-at-time delay nil #'acapella-transport--sse-reopen handle))
+             (when on-close
+               (funcall on-close (append (list :exit event)
+                                         (when can-reconnect
+                                           (list :reconnect t :attempt next-attempt
+                                                 :max acapella-sse-reconnect-max :delay delay))))))
            (when (buffer-live-p buf) (kill-buffer buf))))
         handle))))
 
@@ -298,6 +316,13 @@ Increments retry counter and resets process/buffer/acc."
     (set-process-filter
      proc
      (lambda (_proc chunk)
+       ;; Capture server-provided retry: N (ms) hints if present
+       (let ((start 0))
+         (while (string-match "^[ \t]*retry:[ \t]*\\([0-9]+\\)" chunk start)
+           (let ((ms (string-to-number (match-string 1 chunk))))
+             (when (> ms 0)
+               (setf (acapella-transport-sse-server-retry-ms handle) ms)))
+           (setq start (match-end 0))))
        (pcase-let* ((`(,acc2 . ,events) (acapella-transport--parse-sse-events (acapella-transport-sse-acc handle) chunk)))
          (setf (acapella-transport-sse-acc handle) acc2)
          (dolist (ev events)
@@ -312,16 +337,26 @@ Increments retry counter and resets process/buffer/acc."
      proc
      (lambda (_proc event)
        (acapella-transport--traffic-log "SSE CLOSE %s %s (reopen)" url (string-trim event))
-       (let ((finished (string-match-p (rx (or "finished" "done")) event)))
-         (when (and (not finished)
-                    (acapella-transport-sse-auto-reconnect handle)
-                    (< (or (acapella-transport-sse-retries handle) 0) acapella-sse-reconnect-max))
-           (let* ((next-attempt (1+ (or (acapella-transport-sse-retries handle) 0)))
-                  (delay (acapella-transport--reconnect-delay next-attempt)))
-             (run-at-time delay nil
-                          #'acapella-transport--sse-reopen handle))))
-       (when (acapella-transport-sse-on-close handle)
-         (funcall (acapella-transport-sse-on-close handle) (list :exit event)))
+       (let* ((finished (string-match-p (rx (or "finished" "done")) event))
+              (can-reconnect (and (not finished)
+                                  (acapella-transport-sse-auto-reconnect handle)
+                                  (< (or (acapella-transport-sse-retries handle) 0)
+                                     acapella-sse-reconnect-max)))
+              (next-attempt (and can-reconnect
+                                 (1+ (or (acapella-transport-sse-retries handle) 0))))
+              (server-ms (acapella-transport-sse-server-retry-ms handle))
+              (delay (and next-attempt
+                          (if (and server-ms (> server-ms 0))
+                              (/ server-ms 1000.0)
+                            (acapella-transport--reconnect-delay next-attempt)))))
+         (when can-reconnect
+           (run-at-time delay nil #'acapella-transport--sse-reopen handle))
+         (when (acapella-transport-sse-on-close handle)
+           (funcall (acapella-transport-sse-on-close handle)
+                    (append (list :exit event)
+                            (when can-reconnect
+                              (list :reconnect t :attempt next-attempt
+                                    :max acapella-sse-reconnect-max :delay delay))))))
        (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (defun acapella-transport-sse-close (handle)

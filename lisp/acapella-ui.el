@@ -92,22 +92,26 @@
           (mapconcat (lambda (p) (or (acapella-util-jget p "text") "")) parts ""))))
      (t nil))))
 
-(defun acapella-ui--event-final-p (result)
-  "Return non-nil if RESULT indicates final completion (status-update with completed state)."
+(defun acapella-ui--event-terminal-state (result)
+  "Return terminal state string if RESULT indicates final for status-update."
   (when (string= (acapella-util-jget result "kind") "status-update")
     (let* ((status (acapella-util-jget result "status"))
            (state  (and status (acapella-util-jget status "state")))
            (final  (acapella-util-jget result "final")))
-      (and final (string= state "completed")))))
+      (when final
+        (cond
+         ((member state '("completed" "canceled" "failed" "rejected")) state)
+         (t nil))))))
 
 (defun acapella-ui--on-stream-event (obj)
-  "Common handler: extract text from OBJ and append; append marker on final."
+  "Common handler: extract text from OBJ and append; append marker on terminal state."
   (let* ((result (and obj (acapella-util-jget obj "result")))
-         (txt    (and result (acapella-ui--event-text-from-result result))))
+         (txt    (and result (acapella-ui--event-text-from-result result)))
+         (term   (and result (acapella-ui--event-terminal-state result))))
     (when (and txt (not (string-empty-p txt)))
       (acapella-ui--append txt))
-    (when (and result (acapella-ui--event-final-p result))
-      (acapella-ui--append-line " [final]" 'shadow))))
+    (when term
+      (acapella-ui--append-line (format " [%s]" term) 'shadow))))
 
 ;;; Interactive commands -------------------------------------------------------
 
@@ -160,7 +164,14 @@
            profile text
            (lambda (obj)
              (acapella-ui--on-stream-event obj))
-           (lambda (_exit)
+           (lambda (info)
+             (when (plist-get info :reconnect)
+               (acapella-ui--append-line
+                (format " [reconnect scheduled: attempt %s/%s, in %ss]"
+                        (plist-get info :attempt)
+                        (plist-get info :max)
+                        (plist-get info :delay))
+                'shadow))
              (acapella-ui--append-line ""))))))
 
 ;;;###autoload
@@ -217,7 +228,14 @@
            profile task-id
            (lambda (obj)
              (acapella-ui--on-stream-event obj))
-           (lambda (_exit)
+           (lambda (info)
+             (when (plist-get info :reconnect)
+               (acapella-ui--append-line
+                (format " [reconnect scheduled: attempt %s/%s, in %ss]"
+                        (plist-get info :attempt)
+                        (plist-get info :max)
+                        (plist-get info :delay))
+                'shadow))
              (acapella-ui--append-line ""))))))
 
 ;;;###autoload
