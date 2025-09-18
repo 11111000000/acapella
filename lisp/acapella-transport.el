@@ -313,13 +313,13 @@ Asynchronous; ON-DONE called in a temporary buffer context."
              (hdrs '()))
          (goto-char (point-min))
          (when (re-search-forward "\r?\n\r?\n" nil t)
-           (let* ((header-region (buffer-substring (point-min) (match-beginning 0)))
-                  (lines (split-string header-region "\r?\n" t)))
-             (dolist (l lines)
-               (when (string-match "\\`\\([^:]+\\):[ \t]*\\(.*\\)\\'" l)
-                 (push (cons (match-string 1 l) (match-string 2 l)) hdrs)))))
+           (let ((header-region (buffer-substring (point-min) (match-beginning 0))))
+             (setq hdrs (acapella-transport--parse-headers-from-string header-region))))
          (let* ((body (buffer-substring-no-properties (point) (point-max)))
-                (resp (list :status code :headers (nreverse hdrs) :body body :error err)))
+                (resp (list :status code
+                            :headers hdrs
+                            :content-type (acapella-transport--extract-content-type hdrs)
+                            :body body :error err)))
            (acapella-transport--traffic-log "HTTP RESP %s code=%s len=%d err=%S"
                                             url code (length body) err)
            (funcall on-done resp))

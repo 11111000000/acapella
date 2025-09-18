@@ -354,7 +354,9 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object (may include 
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
+          (funcall on-result
+                   (acapella-a2a--normalize-jsonrpc
+                    (acapella-a2a--http->jsonrpc resp #'identity)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: Push Notification Config (set/get/list/delete)
