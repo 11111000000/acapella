@@ -1,4 +1,3 @@
-#+title: Acapella: A2A Client for Emacs
 #+author: Peter Kosov <11111000000@email.com>
 #+startup: content
 #+options: toc:t
