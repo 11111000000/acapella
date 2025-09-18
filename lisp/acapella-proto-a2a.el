@@ -44,6 +44,24 @@
     ,@(when task-id `(("taskId" . ,task-id)))
     ,@(when context-id `(("contextId" . ,context-id)))))
 
+(defun acapella-a2a--http->jsonrpc (resp on-success)
+  "Normalize HTTP RESP to JSON-RPC-like object. If 2xx, parse and call ON-SUCCESS with alist.
+On error, return ((\"jsonrpc\" . \"2.0\") (\"error\" . ((\"code\" . -HTTP) (\"message\" . ... ) ...)))."
+  (let ((status (plist-get resp :status))
+        (body   (plist-get resp :body))
+        (hdrs   (plist-get resp :headers)))
+    (if (and status (>= status 200) (< status 300))
+        (condition-case err
+            (funcall on-success (acapella-a2a--parse-json body))
+          (error `(("jsonrpc" . "2.0")
+                   ("error" . (("code" . -32700)
+                               ("message" . ,(error-message-string err)))))))
+      (let* ((wa (cdr (acapella-a2a--find-header hdrs "WWW-Authenticate"))))
+        `(("jsonrpc" . "2.0")
+          ("error" . (("code" . ,(- (or status 0)))
+                      ("message" . ,(format "HTTP error %s" status))
+                      ,@(when wa `(("data" . (("www-authenticate" . ,wa))))))))))))
+
 
 ;; Helper: resolve JSON-RPC URL (Agent Card if configured) ---------------------
 
@@ -73,17 +91,7 @@ ON-RESULT is called once with the decoded JSON object."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let* ((status (plist-get resp :status))
-                 (body (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 (defun acapella-a2a-stream (profile text on-event on-close)
   "Stream TEXT via A2A message/stream using PROFILE.
@@ -133,17 +141,7 @@ ON-RESULT is called once with parsed JSON alist (or error object)."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 (defun acapella-a2a-cancel (profile task-id on-result)
   "Call A2A JSON-RPC method tasks/cancel using PROFILE for TASK-ID.
@@ -162,17 +160,7 @@ ON-RESULT is called once with parsed JSON alist (or error object)."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: tasks/resubscribe (SSE)
@@ -331,21 +319,7 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object (may include 
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status  (plist-get resp :status))
-                (body    (plist-get resp :body))
-                (hdrs    (plist-get resp :headers)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (let* ((wa (cdr (acapella-a2a--find-header hdrs "WWW-Authenticate"))))
-                (funcall on-result
-                         `(("jsonrpc" . "2.0")
-                           ("error" . (("code" . ,(- status))
-                                       ("message" . ,(format "HTTP error %s fetching Authenticated Card" status))
-                                       ,@(when wa `(("data" . (("www-authenticate" . ,wa))))))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: Push Notification Config (set/get/list/delete)
@@ -368,17 +342,7 @@ Call ON-RESULT with parsed JSON-RPC response."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 (defun acapella-a2a-push-get (profile task-id config-id on-result)
   "Get push notification config for TASK-ID and CONFIG-ID via A2A tasks/pushNotificationConfig/get."
@@ -398,17 +362,7 @@ Call ON-RESULT with parsed JSON-RPC response."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 (defun acapella-a2a-push-list (profile task-id on-result)
   "List push notification configs for TASK-ID via A2A tasks/pushNotificationConfig/list."
@@ -426,17 +380,7 @@ Call ON-RESULT with parsed JSON-RPC response."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
-            (if (and status (>= status 200) (< status 300))
-                (condition-case err
-                    (funcall on-result (acapella-a2a--parse-json body))
-                  (error (funcall on-result `(("jsonrpc" . "2.0")
-                                              ("error" . (("code" . -32700)
-                                                          ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+          (funcall on-result (acapella-a2a--http->jsonrpc resp #'identity))))))))
 
 (defun acapella-a2a-push-delete (profile task-id config-id on-result)
   "Delete push notification config CONFIG-ID for TASK-ID via A2A tasks/pushNotificationConfig/delete."

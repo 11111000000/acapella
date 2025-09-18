@@ -94,7 +94,11 @@ Asynchronous; ON-DONE called in a temporary buffer context."
   on-event
   on-close
   url
-  headers)
+  headers
+  payload
+  last-id
+  retries
+  auto-reconnect)
 
 (defun acapella-transport--parse-sse-events (acc chunk)
   "Accumulate CHUNK into ACC string and return (cons NEW-ACC events-list).
@@ -156,7 +160,9 @@ Return an SSE handle object."
       (let ((handle (acapella-transport--make-sse
                      :process proc :buffer buf :acc ""
                      :on-event on-event :on-close on-close
-                     :url url :headers headers)))
+                     :url url :headers headers
+                     :payload data :last-id nil :retries 0
+                     :auto-reconnect acapella-sse-auto-reconnect)))
         (set-process-filter
          proc
          (lambda (_proc chunk)
@@ -165,6 +171,7 @@ Return an SSE handle object."
              (dolist (ev events)
                (let* ((id (cdr (assq 'id ev)))
                       (data (cdr (assq 'data ev))))
+                 (when id (setf (acapella-transport-sse-last-id handle) id))
                  (acapella-transport--traffic-log "SSE EVENT %s id=%s len=%s"
                                                   url (or id "nil") (if data (length data) 0))
                  (when data
@@ -173,10 +180,76 @@ Return an SSE handle object."
          proc
          (lambda (_proc event)
            (acapella-transport--traffic-log "SSE CLOSE %s %s" url (string-trim event))
+           (let ((finished (string-match-p (rx (or "finished" "done")) event)))
+             (when (and (not finished)
+                        (acapella-transport-sse-auto-reconnect handle)
+                        (< (or (acapella-transport-sse-retries handle) 0) acapella-sse-reconnect-max))
+               (acapella-transport--traffic-log "SSE RECONNECT scheduled after %ss (attempt %s/%s)"
+                                                acapella-sse-reconnect-delay-seconds
+                                                (1+ (or (acapella-transport-sse-retries handle) 0))
+                                                acapella-sse-reconnect-max)
+               (run-at-time
+                acapella-sse-reconnect-delay-seconds nil
+                #'acapella-transport--sse-reopen handle)))
            (when on-close
              (funcall on-close (list :exit event)))
            (when (buffer-live-p buf) (kill-buffer buf))))
         handle))))
+
+(defun acapella-transport--sse-reopen (handle)
+  "Re-open SSE for HANDLE using Last-Event-ID if available.
+Increments retry counter and resets process/buffer/acc."
+  (let* ((curl (executable-find "curl"))
+         (url  (acapella-transport-sse-url handle))
+         (base-h (acapella-transport-sse-headers handle))
+         (last (acapella-transport-sse-last-id handle))
+         (payload (acapella-transport-sse-payload handle))
+         (headers (if last (cons (cons "Last-Event-ID" last) base-h) base-h))
+         (buf (generate-new-buffer " *acapella-sse*"))
+         (args (append
+                (list "-sS" "-N" "--no-buffer"
+                      "-H" "Accept: text/event-stream"
+                      "-H" "Content-Type: application/json")
+                (apply #'append (mapcar (lambda (kv) (list "-H" (format "%s: %s" (car kv) (cdr kv))))
+                                        headers))
+                (list "-X" "POST" "-d" payload url)))
+         (proc (make-process
+                :name "acapella-sse"
+                :buffer buf
+                :command (cons curl args)
+                :connection-type 'pipe
+                :noquery t)))
+    (setf (acapella-transport-sse-retries handle)
+          (1+ (or (acapella-transport-sse-retries handle) 0)))
+    (setf (acapella-transport-sse-process handle) proc)
+    (setf (acapella-transport-sse-buffer handle) buf)
+    (setf (acapella-transport-sse-acc handle) "")
+    (set-process-filter
+     proc
+     (lambda (_proc chunk)
+       (pcase-let* ((`(,acc2 . ,events) (acapella-transport--parse-sse-events (acapella-transport-sse-acc handle) chunk)))
+         (setf (acapella-transport-sse-acc handle) acc2)
+         (dolist (ev events)
+           (let* ((id (cdr (assq 'id ev)))
+                  (data (cdr (assq 'data ev))))
+             (when id (setf (acapella-transport-sse-last-id handle) id))
+             (acapella-transport--traffic-log "SSE EVENT %s id=%s len=%s (reopen)"
+                                              url (or id "nil") (if data (length data) 0))
+             (when data
+               (funcall (acapella-transport-sse-on-event handle) (list :id id :data data))))))))
+    (set-process-sentinel
+     proc
+     (lambda (_proc event)
+       (acapella-transport--traffic-log "SSE CLOSE %s %s (reopen)" url (string-trim event))
+       (let ((finished (string-match-p (rx (or "finished" "done")) event)))
+         (when (and (not finished)
+                    (acapella-transport-sse-auto-reconnect handle)
+                    (< (or (acapella-transport-sse-retries handle) 0) acapella-sse-reconnect-max))
+           (run-at-time acapella-sse-reconnect-delay-seconds nil
+                        #'acapella-transport--sse-reopen handle)))
+       (when (acapella-transport-sse-on-close handle)
+         (funcall (acapella-transport-sse-on-close handle) (list :exit event)))
+       (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (defun acapella-transport-sse-close (handle)
   "Close SSE HANDLE."
