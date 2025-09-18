@@ -371,5 +371,19 @@
       (should (= (alist-get "code" err nil nil #'string=) -401))
       (should (string-match-p "Bearer" (alist-get "www-authenticate" data nil nil #'string=))))))
 
+(ert-deftest acapella-a2a-tasks-list-envelope ()
+  "tasks/list must produce proper JSON-RPC method and params."
+  (let* ((profile (acapella-a2a-test--dummy-profile))
+         (called nil))
+    (cl-letf (((symbol-function 'acapella-transport-http-post)
+               (lambda (_url _headers body on-done)
+                 (let* ((obj (json-parse-string body :object-type 'alist))
+                        (m (alist-get "method" obj nil nil #'string=)))
+                   (should (equal m "tasks/list")))
+                 (funcall on-done (list :status 200 :headers nil
+                                        :body "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":[]}")))))
+      (acapella-a2a-list-tasks profile nil (lambda (_resp) (setq called t))))
+    (should called)))
+
 (provide 'acapella-a2a-test)
 ;;; acapella-a2a-test.el ends here

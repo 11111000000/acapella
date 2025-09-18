@@ -268,6 +268,15 @@
            (view-mode 1)
            (pop-to-buffer (current-buffer))))))))
 
+;;;###autoload
+(defun acapella-clear-agent-card-cache (&optional current-only)
+  "Clear Agent Card cache. With CURRENT-ONLY (interactive prefix), clear only current profile."
+  (interactive "P")
+  (let ((profile (and current-only (acapella-ui--ensure-profile))))
+    (acapella-a2a-clear-agent-card-cache profile)
+    (message "[Acapella] Agent Card cache %s"
+             (if profile "cleared for current profile" "fully cleared"))))
+
 (defun acapella-ui--format-error (err)
   "Format ERR alist into a user-friendly string."
   (let* ((code (acapella-util-jget err "code"))
@@ -303,6 +312,23 @@
                     acapella-profiles))
       (message "[Acapella] Extensions %s for profile %s"
                (if new-ext "enabled" "disabled") name))))
+
+;;;###autoload
+(defun acapella-list-tasks ()
+  "Call A2A tasks/list and show the result in a temporary buffer."
+  (interactive)
+  (let ((profile (acapella-ui--ensure-profile)))
+    (acapella-a2a-list-tasks
+     profile nil
+     (lambda (obj)
+       (with-current-buffer (get-buffer-create "*Acapella Tasks*")
+         (let ((inhibit-read-only t))
+           (erase-buffer)
+           (insert (json-encode obj))
+           (json-pretty-print (point-min) (point-max))
+           (goto-char (point-min))
+           (view-mode 1)
+           (pop-to-buffer (current-buffer))))))))
 
 (provide 'acapella-ui)
 

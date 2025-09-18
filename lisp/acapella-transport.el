@@ -23,6 +23,21 @@
   "Transport layer for Acapella."
   :group 'acapella)
 
+(defcustom acapella-sse-auto-reconnect t
+  "When non-nil, automatically attempt to reconnect SSE streams on unexpected close."
+  :type 'boolean
+  :group 'acapella-transport)
+
+(defcustom acapella-sse-reconnect-delay-seconds 2
+  "Delay in seconds before attempting SSE reconnect."
+  :type 'integer
+  :group 'acapella-transport)
+
+(defcustom acapella-sse-reconnect-max 5
+  "Maximum number of SSE auto-reconnect attempts."
+  :type 'integer
+  :group 'acapella-transport)
+
 (defcustom acapella-traffic-buffer "*Acapella Traffic*"
   "Name of buffer to log transport events."
   :type 'string

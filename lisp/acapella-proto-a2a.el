@@ -47,16 +47,23 @@
 
 (defun acapella-a2a--http->jsonrpc (resp on-success)
   "Normalize HTTP RESP to JSON-RPC-like object. If 2xx, parse and call ON-SUCCESS with alist.
-On error, return JSON-RPC-shaped error alist including WWW-Authenticate when present."
+On error, return JSON-RPC-shaped error alist including WWW-Authenticate when present.
+If Content-Type is present and not application/json, return a parse-like error."
   (let ((status (plist-get resp :status))
         (body   (plist-get resp :body))
-        (hdrs   (plist-get resp :headers)))
+        (hdrs   (plist-get resp :headers))
+        (ctype  (plist-get resp :content-type)))
     (if (and status (>= status 200) (< status 300))
-        (condition-case err
-            (funcall on-success (acapella-a2a--parse-json body))
-          (error `(("jsonrpc" . "2.0")
-                   ("error" . (("code" . -32700)
-                               ("message" . ,(error-message-string err)))))))
+        (if (and (stringp ctype)
+                 (not (string-match-p "application/json" (downcase ctype))))
+            `(("jsonrpc" . "2.0")
+              ("error" . (("code" . -32700)
+                          ("message" . ,(format "Unexpected Content-Type: %s (expected application/json)" ctype)))))
+          (condition-case err
+              (funcall on-success (acapella-a2a--parse-json body))
+            (error `(("jsonrpc" . "2.0")
+                     ("error" . (("code" . -32700)
+                                 ("message" . ,(error-message-string err))))))))
       (let* ((wa (cdr (acapella-util-ci-header-find hdrs "WWW-Authenticate"))))
         `(("jsonrpc" . "2.0")
           ("error" . (("code" . ,(- (or status 0)))
@@ -405,6 +412,16 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object (may include 
         (when key (remhash key acapella-a2a--agent-card-cache)))
     (clrhash acapella-a2a--agent-card-cache))
   t)
+
+;; ---------------------------------------------------------------------------
+;; A2A: tasks/list (JSON-RPC, optional per spec)
+
+(defun acapella-a2a-list-tasks (profile params on-result)
+  "List tasks via A2A JSON-RPC method tasks/list using PROFILE.
+PARAMS is an alist (may be nil) passed as JSON-RPC params.
+ON-RESULT is called with normalized JSON-RPC object."
+  (acapella-a2a--rpc-call
+   profile "tasks/list" (or params '()) on-result))
 
 (provide 'acapella-proto-a2a)
 
