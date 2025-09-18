@@ -377,17 +377,25 @@ Return nil if valid, or an error-shaped alist ((\"jsonrpc\" . \"2.0\") (\"error\
 
 (defun acapella-a2a-resolve-jsonrpc-url (profile on-result)
   "Fetch Agent Card for PROFILE and call ON-RESULT with chosen JSONRPC URL (string).
-Fallback to PROFILE :url on error or when URL cannot be selected."
+Fallback to PROFILE :url on error or when URL cannot be selected. Also logs the selection into Traffic."
   (let* ((fallback (acapella--profile-url profile)))
     (acapella-a2a-fetch-agent-card
      profile
      (lambda (card-or-error)
        (let ((err (alist-get "error" card-or-error nil nil #'string=)))
          (if err
-             (funcall on-result fallback)
+             (progn
+               (acapella-transport--traffic-log "A2A URL resolve: fallback %s (Agent Card error: %s)"
+                                                fallback
+                                                (alist-get "message" err nil nil #'string=))
+               (funcall on-result fallback))
            ;; Не блокируемся на строгой валидации: пытаемся выбрать URL.
-           (let ((url (acapella-a2a-select-jsonrpc-url card-or-error fallback)))
-             (funcall on-result (or url fallback)))))))))
+           (let* ((chosen (acapella-a2a-select-jsonrpc-url card-or-error fallback))
+                  (source (if (and chosen (not (string= chosen fallback)))
+                              "card"
+                            "fallback")))
+             (acapella-transport--traffic-log "A2A URL resolve: %s (source=%s)" chosen source)
+             (funcall on-result (or chosen fallback)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Authenticated Extended Agent Card (JSON-RPC)

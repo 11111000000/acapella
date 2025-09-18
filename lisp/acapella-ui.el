@@ -279,6 +279,34 @@ Additionally, show \"auth-required\" marker even if not final."
                     (if push "true" "false"))))))))
 
 ;;;###autoload
+(defun acapella-show-agent-security ()
+  "Show Agent Card securitySchemes/security for current profile to help configure auth-source."
+  (interactive)
+  (let ((profile (acapella-ui--ensure-profile)))
+    (acapella-a2a-fetch-agent-card
+     profile
+     (lambda (obj)
+       (let* ((err (alist-get "error" obj nil nil #'string=))
+              (schemes (and (not err) (alist-get "securitySchemes" obj nil nil #'string=)))
+              (security (and (not err) (alist-get "security" obj nil nil #'string=))))
+         (cond
+          (err
+           (message "[Acapella] Security error: %s"
+                    (alist-get "message" err nil nil #'string=)))
+          ((or schemes security)
+           (with-current-buffer (get-buffer-create "*Acapella Agent Security*")
+             (let ((inhibit-read-only t))
+               (erase-buffer)
+               (insert (json-encode `(("securitySchemes" . ,schemes)
+                                      ("security" . ,security))))
+               (json-pretty-print (point-min) (point-max))
+               (goto-char (point-min))
+               (view-mode 1)
+               (pop-to-buffer (current-buffer)))))
+          (t
+           (message "[Acapella] No security info found in Agent Card"))))))))
+
+;;;###autoload
 (defun acapella-validate-agent-card ()
   "Validate Agent Card for current profile and show result."
   (interactive)
@@ -303,6 +331,17 @@ Additionally, show \"auth-required\" marker even if not final."
      profile
      (lambda (url)
        (message "[Acapella] JSON-RPC URL: %s" url)))))
+
+;;;###autoload
+(defun acapella-copy-agent-url ()
+  "Resolve JSON-RPC URL via Agent Card and copy it to kill-ring."
+  (interactive)
+  (let ((profile (acapella-ui--ensure-profile)))
+    (acapella-a2a-resolve-jsonrpc-url
+     profile
+     (lambda (url)
+       (kill-new url)
+       (message "[Acapella] Copied JSON-RPC URL: %s" url)))))
 
 ;;;###autoload
 (defun acapella-show-authenticated-agent-card ()

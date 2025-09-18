@@ -54,9 +54,16 @@
   :type 'string
   :group 'acapella-transport)
 
+(defcustom acapella-traffic-log-level 'info
+  "Traffic log level: nil (off), 'info, or 'debug."
+  :type '(choice (const :tag "Off" nil)
+                 (const :tag "Info" info)
+                 (const :tag "Debug" debug))
+  :group 'acapella-transport)
+
 (defun acapella-transport--traffic-log (fmt &rest args)
   "Append a formatted message to traffic buffer."
-  (when acapella-traffic-buffer
+  (when (and acapella-traffic-buffer acapella-traffic-log-level)
     (with-current-buffer (get-buffer-create acapella-traffic-buffer)
       (goto-char (point-max))
       (let ((inhibit-read-only t))
