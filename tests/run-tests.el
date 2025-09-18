@@ -22,6 +22,8 @@
 (load "acapella-a2a-test.el" nil t)
 (load "acapella-config-test.el" nil t)
 (load "acapella-ui-test.el" nil t)
+(load "acapella-a2a-stageb-test.el" nil t)
+(load "acapella-transport-test.el" nil t)
 
 ;; Run all tests
 (ert-run-tests-batch-and-exit)

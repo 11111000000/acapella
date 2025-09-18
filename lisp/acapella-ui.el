@@ -93,15 +93,17 @@
      (t nil))))
 
 (defun acapella-ui--event-terminal-state (result)
-  "Return terminal state string if RESULT indicates final for status-update."
+  "Return marker string for RESULT status-update.
+Terminal states return their name when `final' is true.
+Additionally, show \"auth-required\" marker even if not final."
   (when (string= (acapella-util-jget result "kind") "status-update")
     (let* ((status (acapella-util-jget result "status"))
            (state  (and status (acapella-util-jget status "state")))
            (final  (acapella-util-jget result "final")))
-      (when final
-        (cond
-         ((member state '("completed" "canceled" "failed" "rejected")) state)
-         (t nil))))))
+      (cond
+       ((and final (member state '("completed" "canceled" "failed" "rejected"))) state)
+       ((string= state "auth-required") "auth-required")
+       (t nil)))))
 
 (defun acapella-ui--on-stream-event (obj)
   "Common handler: extract text from OBJ and append; append marker on terminal state."
@@ -256,6 +258,25 @@
            (goto-char (point-min))
            (view-mode 1)
            (pop-to-buffer (current-buffer))))))))
+
+;;;###autoload
+(defun acapella-show-agent-capabilities ()
+  "Show Agent Card capabilities (streaming, pushNotifications) for current profile."
+  (interactive)
+  (let ((profile (acapella-ui--ensure-profile)))
+    (acapella-a2a-fetch-agent-card
+     profile
+     (lambda (obj)
+       (let* ((err (alist-get "error" obj nil nil #'string=))
+              (caps (and (not err) (alist-get "capabilities" obj nil nil #'string=)))
+              (streaming (and caps (alist-get "streaming" caps nil nil #'string=)))
+              (push (and caps (alist-get "pushNotifications" caps nil nil #'string=))))
+         (if err
+             (message "[Acapella] Capabilities error: %s"
+                      (alist-get "message" err nil nil #'string=))
+           (message "[Acapella] Capabilities: streaming=%s, pushNotifications=%s"
+                    (if streaming "true" "false")
+                    (if push "true" "false"))))))))
 
 ;;;###autoload
 (defun acapella-validate-agent-card ()

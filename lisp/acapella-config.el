@@ -47,21 +47,14 @@ If 0 or negative, caching is effectively disabled."
   :type 'integer
   :group 'acapella)
 
-(defcustom acapella-sse-auto-reconnect nil
-  "When non-nil, attempt to auto-reconnect SSE streams after disconnects.
-Reconnect uses Last-Event-ID if available."
-  :type 'boolean
-  :group 'acapella)
+;; [moved] SSE reconnect settings are defined in acapella-transport.el:
+;; - acapella-sse-auto-reconnect
+;; - acapella-sse-reconnect-delay-seconds
+;; - acapella-sse-reconnect-max
 
-(defcustom acapella-sse-reconnect-delay-seconds 2
-  "Delay (in seconds) before attempting SSE reconnection."
-  :type 'integer
-  :group 'acapella)
+;; [moved] See acapella-transport.el defcustom `acapella-sse-reconnect-delay-seconds'.
 
-(defcustom acapella-sse-reconnect-max 3
-  "Maximum number of reconnection attempts for a single SSE stream."
-  :type 'integer
-  :group 'acapella)
+;; [moved] See acapella-transport.el defcustom `acapella-sse-reconnect-max'.
 
 (defvar acapella--current-profile-name nil
   "Name of the currently selected profile, or nil if none.")

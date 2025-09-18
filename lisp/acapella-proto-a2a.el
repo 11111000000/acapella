@@ -48,11 +48,16 @@
 (defun acapella-a2a--http->jsonrpc (resp on-success)
   "Normalize HTTP RESP to JSON-RPC-like object. If 2xx, parse and call ON-SUCCESS with alist.
 On error, return JSON-RPC-shaped error alist including WWW-Authenticate when present.
-If Content-Type is present and not application/json, return a parse-like error."
-  (let ((status (plist-get resp :status))
-        (body   (plist-get resp :body))
-        (hdrs   (plist-get resp :headers))
-        (ctype  (plist-get resp :content-type)))
+If Content-Type is present and not application/json, return a parse-like error.
+
+This function will check both :content-type in RESP and the headers alist
+(looking for \"Content-Type\") to be robust against mocks that provide only :headers."
+  (let* ((status (plist-get resp :status))
+         (body   (plist-get resp :body))
+         (hdrs   (plist-get resp :headers))
+         (ctype  (or (plist-get resp :content-type)
+                     (when (and hdrs (functionp #'acapella-util-ci-header-find))
+                       (cdr (acapella-util-ci-header-find hdrs "Content-Type"))))))
     (if (and status (>= status 200) (< status 300))
         (if (and (stringp ctype)
                  (not (string-match-p "application/json" (downcase ctype))))
@@ -60,7 +65,17 @@ If Content-Type is present and not application/json, return a parse-like error."
               ("error" . (("code" . -32700)
                           ("message" . ,(format "Unexpected Content-Type: %s (expected application/json)" ctype)))))
           (condition-case err
-              (funcall on-success (acapella-a2a--parse-json body))
+              (funcall on-success
+                       (let ((parsed (condition-case perr
+                                         (acapella-a2a--parse-json body)
+                                       (error (progn
+                                                (acapella-transport--traffic-log "JSON parse error body=%s err=%S" body perr)
+                                                (signal 'json-parse-error perr))))))
+                         parsed))
+            (json-parse-error
+             `(("jsonrpc" . "2.0")
+               ("error" . (("code" . -32700)
+                           ("message" . ,(error-message-string (cadr (cond ((listp err) err) (t (list err))))))))))
             (error `(("jsonrpc" . "2.0")
                      ("error" . (("code" . -32700)
                                  ("message" . ,(error-message-string err))))))))
@@ -331,22 +346,38 @@ Return chosen URL string or FALLBACK-URL."
      (t fallback-url))))
 
 (defun acapella-a2a-validate-agent-card (agent-card)
-  "Validate minimal requirements of AGENT-CARD per A2A §5.6.
+  "Validate minimal requirements of AGENT-CARD per A2A §5.6/§5.6.4.
 Return nil if valid, or an error-shaped alist ((\"jsonrpc\" . \"2.0\") (\"error\" . ...)) if invalid."
   (let* ((pref (alist-get "preferredTransport" agent-card nil nil #'string=))
-         (url  (alist-get "url" agent-card nil nil #'string=)))
+         (url  (alist-get "url" agent-card nil nil #'string=))
+         (ifaces (alist-get "additionalInterfaces" agent-card nil nil #'string=)))
     (cond
+     ;; preferredTransport is required
      ((not (stringp pref))
       '(("jsonrpc" . "2.0")
-        ("error" . (("code" . -32006) ("message" . "Agent Card missing preferredTransport")))))
+        ("error" . (("code" . -32006)
+                    ("message" . "Agent Card missing preferredTransport")))))
+     ;; If preferredTransport is JSONRPC, main url must be present
      ((and (string= pref "JSONRPC") (not (stringp url)))
       '(("jsonrpc" . "2.0")
-        ("error" . (("code" . -32006) ("message" . "Agent Card missing main url for JSONRPC")))))
+        ("error" . (("code" . -32006)
+                    ("message" . "Agent Card missing main url for JSONRPC")))))
+     ;; If additionalInterfaces is provided, it SHOULD include entry for main url/transport
+     ((and (listp ifaces) (stringp pref) (stringp url))
+      (let* ((match (seq-find (lambda (it)
+                                (and (string= (alist-get "url" it nil nil #'string=) url)
+                                     (string= (alist-get "transport" it nil nil #'string=) pref)))
+                              ifaces)))
+        (if match
+            nil
+          '(("jsonrpc" . "2.0")
+            ("error" . (("code" . -32006)
+                        ("message" . "Agent Card additionalInterfaces missing entry for main url and preferredTransport")))))))
      (t nil))))
 
 (defun acapella-a2a-resolve-jsonrpc-url (profile on-result)
   "Fetch Agent Card for PROFILE and call ON-RESULT with chosen JSONRPC URL (string).
-Fallback to PROFILE :url on error or invalid Agent Card."
+Fallback to PROFILE :url on error or when URL cannot be selected."
   (let* ((fallback (acapella--profile-url profile)))
     (acapella-a2a-fetch-agent-card
      profile
@@ -354,10 +385,9 @@ Fallback to PROFILE :url on error or invalid Agent Card."
        (let ((err (alist-get "error" card-or-error nil nil #'string=)))
          (if err
              (funcall on-result fallback)
-           (let ((verr (acapella-a2a-validate-agent-card card-or-error)))
-             (if verr
-                 (funcall on-result fallback)
-               (funcall on-result (acapella-a2a-select-jsonrpc-url card-or-error fallback))))))))))
+           ;; Не блокируемся на строгой валидации: пытаемся выбрать URL.
+           (let ((url (acapella-a2a-select-jsonrpc-url card-or-error fallback)))
+             (funcall on-result (or url fallback)))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; Authenticated Extended Agent Card (JSON-RPC)
