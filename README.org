@@ -1,0 +1,261 @@
+#+title: Acapella: A2A-first Agent Client for Emacs
+#+author: Peter Kosov <11111000000@email.com>
+#+startup: content
+#+options: toc:t
+
+* Acapella in one paragraph
+Acapella is an Emacs package that lets you talk to AI agents through the open A2A protocol (JSON-RPC over HTTP + SSE streaming). It provides a small, composable, testable core with an Emacs-first UI: send or stream messages, manage long-running tasks (get/cancel/resubscribe/list), preview artifacts safely, and observe everything in a traffic buffer with structured logs.
+
+* Why this exists (epistemology and philosophy)
+- Emptiness before form. The utility of a vessel is in its emptiness: Acapella keeps a functional core minimal and open, so different protocols and servers can “pour” their content without changing the vessel. We model only the essentials: Message, Task, Artifact, Event.
+- Do less, do right. Functional core + imperative shell: leave networking, processes and buffers at the edges; keep logic pure and small. Easy to reason about, easy to test.
+- Transparency over mystery. HTTP/JSON/SSE are text. You can inspect traffic, validate headers, log errors, replay inputs. No opaque black box.
+- Composability. Emacs is a programmable text environment; A2A is a clear standard. Together they enable agent tools you can bind, script, and version with your workflow.
+- Reproducibility with care. Secrets live in auth-source, logs mask sensitive headers, artifact downloads are opt-in and limited by whitelist and size. Power with restraint.
+
+* Features
+- A2A-first:
+  - JSON-RPC 2.0 over HTTP: message/send, tasks/get, tasks/cancel, tasks/list.
+  - SSE streaming: message/stream and tasks/resubscribe with Last-Event-ID and retry hints.
+  - Agent Card discovery: resolve the proper JSON-RPC URL from /.well-known/agent-card.json; validate and cache with TTL.
+  - Push-notification config methods (set/get/list/delete) for future push flows.
+- Emacs UI:
+  - Minimal chat buffer with streaming output and clear terminal markers ([completed]/[canceled]/[failed]/[rejected]/[auth-required]/[input-required]).
+  - Traffic buffer for structured logs with levels (info/debug) and trimming.
+  - Commands to show Agent Card, capabilities, and security schemes; copy the resolved server URL.
+  - Safe artifact preview: base64 text/binary; URL download gated by whitelist and max size.
+- Safety and control:
+  - Authorization via auth-source (no tokens in logs).
+  - Domain whitelist and size caps for artifact downloads, HEAD+GET flow when possible.
+  - JSON-RPC error normalization with friendly messages and hints for A2A codes.
+- Small, pure helpers and testable components (ERT).
+
+* Requirements
+- Emacs 28.2+ (29 recommended).
+- curl in PATH for SSE streaming (Acapella uses a subprocess with --no-buffer).
+- An A2A server (e.g., local “HelloWorld” demo on http://localhost:9999).
+
+* Installation
+** Using Cask (recommended)
+1. Install Cask: https://cask.readthedocs.io
+2. In the project directory:
+   #+begin_src sh
+   cask install
+   #+end_src
+3. Load for development or testing:
+   #+begin_src sh
+   cask exec emacs -Q --batch -l tests/run-tests.el
+   #+end_src
+
+** Manual (dev)
+Add the lisp directory to load-path, then require the UI:
+#+begin_src emacs-lisp
+(add-to-list 'load-path "/home/you/Code/acapella/lisp")
+(require 'acapella-ui)
+(acapella-mode 1)
+#+end_src
+
+* Quickstart
+1) Enable mode:
+#+begin_src emacs-lisp
+M-x acapella-mode
+#+end_src
+
+2) Select a profile (defaults include a local A2A demo):
+#+begin_src emacs-lisp
+M-x acapella-select-profile
+#+end_src
+
+3) Send or stream:
+- One-shot:
+  #+begin_src emacs-lisp
+  M-x acapella-send-text
+  #+end_src
+- Streaming:
+  #+begin_src emacs-lisp
+  M-x acapella-stream-text
+  #+end_src
+  You will see partial outputs; terminal states are marked. You can cancel with:
+  #+begin_src emacs-lisp
+  M-x acapella-stream-cancel
+  #+end_src
+
+4) Long-running tasks:
+- Get status:
+  #+begin_src emacs-lisp
+  M-x acapella-get-task
+  #+end_src
+- Cancel:
+  #+begin_src emacs-lisp
+  M-x acapella-cancel-task
+  #+end_src
+- Resubscribe stream (if supported):
+  #+begin_src emacs-lisp
+  M-x acapella-resubscribe-task
+  #+end_src
+- List tasks (optional, if server implements):
+  #+begin_src emacs-lisp
+  M-x acapella-list-tasks
+  #+end_src
+
+5) Discover and inspect agent:
+- Show Agent Card:
+  #+begin_src emacs-lisp
+  M-x acapella-show-agent-card
+  #+end_src
+- Show capabilities (streaming/pushNotifications):
+  #+begin_src emacs-lisp
+  M-x acapella-show-agent-capabilities
+  #+end_src
+- Show security schemes:
+  #+begin_src emacs-lisp
+  M-x acapella-show-agent-security
+  #+end_src
+- Resolve and copy JSON-RPC URL (from Agent Card or fallback):
+  #+begin_src emacs-lisp
+  M-x acapella-resolve-agent-url
+  M-x acapella-copy-agent-url
+  #+end_src
+
+6) Artifacts
+- Open last artifact from streaming events (base64 or URL):
+  #+begin_src emacs-lisp
+  M-x acapella-open-last-artifact
+  #+end_src
+- Download a URL (if downloading is enabled):
+  #+begin_src emacs-lisp
+  M-x acapella-download-artifact-url
+  #+end_src
+
+7) Observe traffic
+#+begin_src emacs-lisp
+M-x acapella-open-traffic
+#+end_src
+Set log level via:
+#+begin_src emacs-lisp
+(setq acapella-traffic-log-level 'info)  ;; or 'debug, or nil to disable
+#+end_src
+
+* Configuration
+** Profiles
+Profiles live in =acapella-profiles= (alist). Minimal example:
+#+begin_src emacs-lisp
+(setq acapella-profiles
+      '(((name . "Local A2A HelloWorld")
+         (protocol . a2a)
+         (url . "http://localhost:9999/")
+         (headers . ())
+         (agent-card-url . "http://localhost:9999/.well-known/agent-card.json")
+         (auth-source . nil))))
+#+end_src
+Switch profiles with:
+#+begin_src emacs-lisp
+M-x acapella-select-profile
+#+end_src
+
+** Agent Card caching
+- acapella-agent-card-ttl-seconds (default 300 sec).
+- Clear cache:
+  #+begin_src emacs-lisp
+  M-x acapella-clear-agent-card-cache
+  ;; With C-u prefix, clears only current profile's cache
+  #+end_src
+
+** Authentication via auth-source
+Attach credentials to a profile:
+#+begin_src emacs-lisp
+;; Example: populate Authorization: Bearer <token> via auth-source
+(push '((name . "Corp Agent")
+        (protocol . a2a)
+        (url . "https://agent.corp.example/rpc")
+        (auth-source . ((machine . "agent.corp.example") (login . "token-user"))))
+      acapella-profiles)
+#+end_src
+Acapella will search auth-source and mask secrets in logs.
+
+** Extensions header (A2A)
+Enable per-profile via a header:
+#+begin_src emacs-lisp
+M-x acapella-toggle-extensions
+#+end_src
+Or set (extensions . '("urn:x:my-ext-1" "urn:x:my-ext-2")) in the profile.
+
+** Traffic log buffer
+- =acapella-traffic-buffer=: name of buffer.
+- =acapella-traffic-log-level=: nil | info | debug.
+- Logs are auto-trimmed (see =acapella-traffic-max-bytes=).
+
+** SSE reconnect
+- =acapella-sse-auto-reconnect= (t by default)
+- =acapella-sse-reconnect-max=, =acapella-sse-reconnect-delay-seconds=
+- Backoff strategy: =acapella-sse-reconnect-backoff= ('linear or 'exponential)
+- Server-provided “retry: N” hints are respected when present.
+
+** Artifacts safety
+- =acapella-artifact-download-enabled=: default is nil (safety first).
+- =acapella-artifact-allowed-domains=: whitelist hostnames.
+- =acapella-artifact-max-bytes=: max allowed size (HEAD + GET flow).
+
+* Usage patterns
+- Region/code workflows: ask to explain/refactor selected text; stream for long outputs.
+- Task-centric flows: launch a job, then monitor and cancel/resubscribe as needed.
+- Evidence and citations: agents may return text with links; you can preview artifacts and copy sections as needed.
+- Project integration: combine with Magit, Org, or code tools (e.g., generate summaries or commit messages from diffs).
+
+* Error handling
+Acapella normalizes JSON-RPC errors for clarity:
+- JSON-RPC common: -32700 (parse error), -32600/1/2/3…
+- A2A domain (-32001..-32007) aligned to spec with friendly messages and hints.
+- HTTP errors (401/403/429/5xx) are represented as negative codes with WWW-Authenticate included (when present).
+
+* Security and privacy
+- Authorization via auth-source, never logged.
+- Traffic buffer masks sensitive headers (Authorization, Proxy-Authorization, X-API-Key).
+- Artifact URL downloads: disabled by default, limited by whitelist and size; HEAD checks used to stop large downloads.
+
+* Design notes
+- Functional core, effect shell:
+  - Pure functions for JSON encoding/decoding, normalization, state-less routing.
+  - IO abstracted through transport (HTTP/SSE) with small, composable functions.
+- Adapters:
+  - A2A adapter (JSON-RPC + SSE) is the primary one.
+  - ACP can be shimmed via a compatibility adapter (future).
+- Observability:
+  - Structured logs (info vs debug), buffer trimming, selective replay value.
+
+* Testing
+- ERT test suite covers:
+  - SSE parsing (including CRLF and server retry hints)
+  - A2A RPC envelopes, HTTP->JSON-RPC normalization
+  - Error normalization (-32001..-32007)
+  - Transport logging levels and trimming
+  - Artifact safety (whitelist, size limits, HEAD/GET behavior)
+- Run tests:
+  #+begin_src sh
+  emacs -Q --batch -l tests/run-tests.el
+  #+end_src
+
+* Troubleshooting
+- “curl not found”: ensure =curl= is installed and on PATH for streaming.
+- “Unauthorized”: check =acapella-show-agent-security= and configure auth-source for your profile.
+- Stream closes quickly: try resubscribe, inspect Traffic; server may not support streaming or requires extensions.
+- Non-JSON 2xx responses: server may be misconfigured (Content-Type should be application/json for JSON-RPC).
+- Artifact downloads blocked: enable =acapella-artifact-download-enabled= and verify whitelist/size settings.
+
+* Roadmap (high level)
+- 1.0.x: polish error normalization and docs; add common code/refactor tools; refine artifact UX.
+- 1.1: more resilient SSE auto-reconnect, additional transports if A2A dictates; UI filters in Traffic.
+- 1.2+: integrations (Magit/Org/Eglot), multi-agent orchestration helpers, richer artifact viewers.
+
+* Contributing
+- Keep functions small and pure where possible.
+- Document public functions with clear docstrings and contracts.
+- Add ERT tests for new behaviors and edge cases.
+- Mask secrets in any logging code; never dump token values.
+- Open issues and PRs with a minimal reproducer and expected behavior.
+
+* License
+Apache-2.0
+
+* A closing note
+Acapella aims to be a quiet connector: a clear, small path between Emacs and agents. It favors the useful emptiness that lets forms change while keeping function steady: text in, events through, artifacts out — all in your editor, all under your control.
