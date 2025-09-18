@@ -74,6 +74,22 @@ Each profile is an alist with keys:
          (auth-h (when token (cons "Authorization" (format "Bearer %s" token)))))
     (if auth-h (cons auth-h base) base)))
 
+(defun acapella--extensions-header (profile)
+  "Return (\"X-A2A-Extensions\" . VALUE) from PROFILE's (extensions . LIST) if present."
+  (let* ((ext (cdr (assq 'extensions profile))))
+    (cond
+     ((and (stringp ext) (not (string-empty-p ext)))
+      (cons "X-A2A-Extensions" ext))
+     ((and (listp ext) ext)
+      (cons "X-A2A-Extensions" (mapconcat #'identity ext ", ")))
+     (t nil))))
+
+(defun acapella--headers-with-auth-and-ext (profile)
+  "Return headers alist for PROFILE including Authorization and X-A2A-Extensions if configured."
+  (let* ((base (acapella--headers-with-auth profile))
+         (ext-h (acapella--extensions-header profile)))
+    (if ext-h (cons ext-h base) base)))
+
 (defun acapella--profile-url (profile)
   "Extract main URL for RPC from PROFILE."
   (or (cdr (assq 'url profile))

@@ -64,7 +64,7 @@ ON-RESULT is called once with the decoded JSON object."
    profile
    (lambda (url)
      (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth profile)))
+                             (acapella--headers-with-auth-and-ext profile)))
             (payload (acapella-a2a--json
                       (acapella-a2a--rpc-envelope
                        "message/send"
@@ -95,7 +95,7 @@ Return an SSE handle."
    (lambda (url)
      (let* ((headers (append '(("Accept" . "text/event-stream")
                                ("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth profile)))
+                             (acapella--headers-with-auth-and-ext profile)))
             (payload (acapella-a2a--json
                       (acapella-a2a--rpc-envelope
                        "message/stream"
@@ -125,7 +125,7 @@ ON-RESULT is called once with parsed JSON alist (or error object)."
    profile
    (lambda (url)
      (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth profile)))
+                             (acapella--headers-with-auth-and-ext profile)))
             (payload (acapella-a2a--json
                       (acapella-a2a--rpc-envelope
                        "tasks/get"
@@ -154,7 +154,7 @@ ON-RESULT is called once with parsed JSON alist (or error object)."
    profile
    (lambda (url)
      (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth profile)))
+                             (acapella--headers-with-auth-and-ext profile)))
             (payload (acapella-a2a--json
                       (acapella-a2a--rpc-envelope
                        "tasks/cancel"
@@ -188,7 +188,7 @@ ON-CLOSE called with plist (:exit STRING). Return SSE handle."
    (lambda (url)
      (let* ((headers (append '(("Accept" . "text/event-stream")
                                ("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth profile)))
+                             (acapella--headers-with-auth-and-ext profile)))
             (payload (acapella-a2a--json
                       (acapella-a2a--rpc-envelope
                        "tasks/resubscribe"
@@ -277,7 +277,7 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object."
    profile
    (lambda (url)
      (let* ((headers (append '(("Content-Type" . "application/json"))
-                             (acapella--headers-with-auth profile)))
+                             (acapella--headers-with-auth-and-ext profile)))
             (payload (acapella-a2a--json
                       (acapella-a2a--rpc-envelope
                        "agent/getAuthenticatedExtendedCard" nil))))
@@ -295,6 +295,127 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object."
               (funcall on-result `(("jsonrpc" . "2.0")
                                    ("error" . (("code" . ,(- status))
                                                ("message" . ,(format "HTTP error %s fetching Authenticated Card" status))))))))))))))
+
+;; ---------------------------------------------------------------------------
+;; A2A: Push Notification Config (set/get/list/delete)
+
+(defun acapella-a2a-push-set (profile config on-result)
+  "Set push notification CONFIG for a task via A2A tasks/pushNotificationConfig/set.
+CONFIG is an alist representing TaskPushNotificationConfig (must include \"taskId\").
+Call ON-RESULT with parsed JSON-RPC response."
+  (let ((task-id (alist-get "taskId" config nil nil #'string=)))
+    (unless (and (stringp task-id) (not (string-empty-p task-id)))
+      (user-error "[Acapella] config.taskId is required")))
+  (acapella-a2a--with-jsonrpc-url
+   profile
+   (lambda (url)
+     (let* ((headers (append '(("Content-Type" . "application/json"))
+                             (acapella--headers-with-auth-and-ext profile)))
+            (payload (acapella-a2a--json
+                      (acapella-a2a--rpc-envelope
+                       "tasks/pushNotificationConfig/set" config))))
+       (acapella-transport-http-post
+        url headers payload
+        (lambda (resp)
+          (let ((status (plist-get resp :status))
+                (body   (plist-get resp :body)))
+            (if (and status (>= status 200) (< status 300))
+                (condition-case err
+                    (funcall on-result (acapella-a2a--parse-json body))
+                  (error (funcall on-result `(("jsonrpc" . "2.0")
+                                              ("error" . (("code" . -32700)
+                                                          ("message" . ,(error-message-string err))))))))
+              (funcall on-result `(("jsonrpc" . "2.0")
+                                   ("error" . (("code" . ,(- status))
+                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+
+(defun acapella-a2a-push-get (profile task-id config-id on-result)
+  "Get push notification config for TASK-ID and CONFIG-ID via A2A tasks/pushNotificationConfig/get."
+  (unless (and (stringp task-id) (not (string-empty-p task-id)))
+    (user-error "[Acapella] task-id is required"))
+  (unless (and (stringp config-id) (not (string-empty-p config-id)))
+    (user-error "[Acapella] config-id is required"))
+  (acapella-a2a--with-jsonrpc-url
+   profile
+   (lambda (url)
+     (let* ((headers (append '(("Content-Type" . "application/json"))
+                             (acapella--headers-with-auth-and-ext profile)))
+            (params `(("taskId" . ,task-id) ("configId" . ,config-id)))
+            (payload (acapella-a2a--json
+                      (acapella-a2a--rpc-envelope
+                       "tasks/pushNotificationConfig/get" params))))
+       (acapella-transport-http-post
+        url headers payload
+        (lambda (resp)
+          (let ((status (plist-get resp :status))
+                (body   (plist-get resp :body)))
+            (if (and status (>= status 200) (< status 300))
+                (condition-case err
+                    (funcall on-result (acapella-a2a--parse-json body))
+                  (error (funcall on-result `(("jsonrpc" . "2.0")
+                                              ("error" . (("code" . -32700)
+                                                          ("message" . ,(error-message-string err))))))))
+              (funcall on-result `(("jsonrpc" . "2.0")
+                                   ("error" . (("code" . ,(- status))
+                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+
+(defun acapella-a2a-push-list (profile task-id on-result)
+  "List push notification configs for TASK-ID via A2A tasks/pushNotificationConfig/list."
+  (unless (and (stringp task-id) (not (string-empty-p task-id)))
+    (user-error "[Acapella] task-id is required"))
+  (acapella-a2a--with-jsonrpc-url
+   profile
+   (lambda (url)
+     (let* ((headers (append '(("Content-Type" . "application/json"))
+                             (acapella--headers-with-auth-and-ext profile)))
+            (params `(("taskId" . ,task-id)))
+            (payload (acapella-a2a--json
+                      (acapella-a2a--rpc-envelope
+                       "tasks/pushNotificationConfig/list" params))))
+       (acapella-transport-http-post
+        url headers payload
+        (lambda (resp)
+          (let ((status (plist-get resp :status))
+                (body   (plist-get resp :body)))
+            (if (and status (>= status 200) (< status 300))
+                (condition-case err
+                    (funcall on-result (acapella-a2a--parse-json body))
+                  (error (funcall on-result `(("jsonrpc" . "2.0")
+                                              ("error" . (("code" . -32700)
+                                                          ("message" . ,(error-message-string err))))))))
+              (funcall on-result `(("jsonrpc" . "2.0")
+                                   ("error" . (("code" . ,(- status))
+                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
+
+(defun acapella-a2a-push-delete (profile task-id config-id on-result)
+  "Delete push notification config CONFIG-ID for TASK-ID via A2A tasks/pushNotificationConfig/delete."
+  (unless (and (stringp task-id) (not (string-empty-p task-id)))
+    (user-error "[Acapella] task-id is required"))
+  (unless (and (stringp config-id) (not (string-empty-p config-id)))
+    (user-error "[Acapella] config-id is required"))
+  (acapella-a2a--with-jsonrpc-url
+   profile
+   (lambda (url)
+     (let* ((headers (append '(("Content-Type" . "application/json"))
+                             (acapella--headers-with-auth-and-ext profile)))
+            (params `(("taskId" . ,task-id) ("configId" . ,config-id)))
+            (payload (acapella-a2a--json
+                      (acapella-a2a--rpc-envelope
+                       "tasks/pushNotificationConfig/delete" params))))
+       (acapella-transport-http-post
+        url headers payload
+        (lambda (resp)
+          (let ((status (plist-get resp :status))
+                (body   (plist-get resp :body)))
+            (if (and status (>= status 200) (< status 300))
+                (condition-case err
+                    (funcall on-result (acapella-a2a--parse-json body))
+                  (error (funcall on-result `(("jsonrpc" . "2.0")
+                                              ("error" . (("code" . -32700)
+                                                          ("message" . ,(error-message-string err))))))))
+              (funcall on-result `(("jsonrpc" . "2.0")
+                                   ("error" . (("code" . ,(- status))
+                                               ("message" . ,(format "HTTP error %s" status))))))))))))))
 
 (provide 'acapella-proto-a2a)
 
