@@ -93,7 +93,7 @@
         (with-current-buffer buf
           (goto-char (point-min))
           (should (string= (buffer-substring-no-properties (point-min) (point-max)) "Hello"))))
-    (when (buffer-live-p buf) (kill-buffer buf)))))
+    (when (buffer-live-p buf) (kill-buffer buf))))
 
 ;; Open last artifact (URI) triggers download
 (ert-deftest acapella-ui-open-last-artifact-url ()
@@ -107,25 +107,25 @@
             ("result" . (("kind" . "artifact-update")
                          ("artifact" . (("name" . "b.txt")
                                         ("parts" . ((("contentType" . "text/plain")
-                                                     ("content_url" . "http://localhost/b.txt")))))))))))
-  (cl-letf (((symbol-function 'acapella-ui--ensure-profile)
-             (lambda () '((name . "X") (url . "http://l/") (headers . ()))))
-            ((symbol-function 'acapella-transport-http-download)
-             (lambda (_url _headers _max on-done)
-               (cl-incf called)
-               (funcall on-done (list :status 200 :headers '(("Content-Type" . "text/plain"))
-                                      :content-type "text/plain" :body "OK")))))
-    (let (buf)
-      (acapella-open-last-artifact)
-      (should (= called 1))
-      (setq buf (get-buffer "*Acapella Artifact: b.txt*"))
-      (unwind-protect
-          (progn
-            (should buf)
-            (with-current-buffer buf
-              (goto-char (point-min))
-              (should (string= (buffer-substring-no-properties (point-min) (point-max)) "OK"))))
-        (when (buffer-live-p buf) (kill-buffer buf))))))
+                                                     ("content_url" . "http://localhost/b.txt"))))))))))
+    (cl-letf (((symbol-function 'acapella-ui--ensure-profile)
+               (lambda () '((name . "X") (url . "http://l/") (headers . ()))))
+              ((symbol-function 'acapella-transport-http-download)
+               (lambda (_url _headers _max on-done)
+                 (cl-incf called)
+                 (funcall on-done (list :status 200 :headers '(("Content-Type" . "text/plain"))
+                                        :content-type "text/plain" :body "OK")))))
+      (let (buf)
+        (acapella-open-last-artifact)
+        (should (= called 1))
+        (setq buf (get-buffer "*Acapella Artifact: b.txt*"))
+        (unwind-protect
+            (progn
+              (should buf)
+              (with-current-buffer buf
+                (goto-char (point-min))
+                (should (string= (buffer-substring-no-properties (point-min) (point-max)) "OK"))))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
 
 ;; Transport download: HEAD too large avoids GET
 (ert-deftest acapella-transport-http-download-head-too-large ()
