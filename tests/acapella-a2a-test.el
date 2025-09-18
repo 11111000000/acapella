@@ -160,6 +160,7 @@
   (let* ((profile (acapella-a2a-test--dummy-profile))
          (called nil)
          (resolved nil))
+    (clrhash acapella-a2a--agent-card-cache)
     (cl-letf (((symbol-function 'acapella-transport-http-get)
                (lambda (_url _headers on-done)
                  ;; Return a minimal card supporting JSONRPC on main url
@@ -176,6 +177,7 @@
   (let* ((profile (acapella-a2a-test--dummy-profile))
          (called nil)
          (resolved nil))
+    (clrhash acapella-a2a--agent-card-cache)
     (cl-letf (((symbol-function 'acapella-transport-http-get)
                (lambda (_url _headers on-done)
                  ;; Simulate HTTP error (e.g., 500)
@@ -312,6 +314,62 @@
                  (funcall on-done (list :status 200 :headers nil :body "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"result\":null}")))))
       (acapella-a2a-push-delete profile "T-DEL" "C-DEL" (lambda (_r) (setq ok t))))
     (should ok)))
+
+;; Agent Card cache tests
+
+(ert-deftest acapella-a2a-agent-card-cache-hit ()
+  "Second resolve within TTL should use cached card (single GET call)."
+  (let* ((profile (acapella-a2a-test--dummy-profile))
+         (calls 0))
+    (let ((acapella-agent-card-ttl-seconds 300))
+      (cl-letf (((symbol-function 'acapella-transport-http-get)
+                 (lambda (_url _headers on-done)
+                   (cl-incf calls)
+                   (funcall on-done (list :status 200 :headers nil
+                                          :body "{\"url\":\"https://cached.example/a2a/v1\",\"preferredTransport\":\"JSONRPC\"}")))))
+        (let (u1 u2)
+          (acapella-a2a-resolve-jsonrpc-url profile (lambda (u) (setq u1 u)))
+          (acapella-a2a-resolve-jsonrpc-url profile (lambda (u) (setq u2 u)))
+          (should (equal u1 "https://cached.example/a2a/v1"))
+          (should (equal u2 "https://cached.example/a2a/v1"))
+          (should (= calls 1)))))))
+
+(ert-deftest acapella-a2a-agent-card-cache-stale-on-error ()
+  "If TTL expired and GET fails, resolver should fall back to stale cached card when present."
+  (let* ((profile (acapella-a2a-test--dummy-profile))
+         (calls 0))
+    (let ((acapella-agent-card-ttl-seconds 0))
+      (cl-letf (((symbol-function 'acapella-transport-http-get)
+                 (lambda (_url _headers on-done)
+                   (cl-incf calls)
+                   (if (= calls 1)
+                       (funcall on-done (list :status 200 :headers nil
+                                              :body "{\"url\":\"https://first.example/a2a/v1\",\"preferredTransport\":\"JSONRPC\"}"))
+                     (funcall on-done (list :status 500 :headers nil :body "Internal"))))))
+        (let (u1 u2)
+          (acapella-a2a-resolve-jsonrpc-url profile (lambda (u) (setq u1 u)))
+          (acapella-a2a-resolve-jsonrpc-url profile (lambda (u) (setq u2 u)))
+          (should (equal u1 "https://first.example/a2a/v1"))
+          (should (equal u2 "https://first.example/a2a/v1"))
+          (should (= calls 2)))))))
+
+(ert-deftest acapella-a2a-auth-card-401-includes-www-authenticate ()
+  "Authenticated card error should include WWW-Authenticate header in error.data."
+  (let* ((profile (acapella-a2a-test--dummy-profile))
+         (got nil))
+    (cl-letf (((symbol-function 'acapella-transport-http-post)
+               (lambda (_url _headers _body on-done)
+                 (funcall on-done (list :status 401
+                                        :headers '(("WWW-Authenticate" . "Bearer realm=\"x\""))
+                                        :body "Unauthorized")))))
+      (acapella-a2a-get-authenticated-card
+       profile
+       (lambda (resp) (setq got resp))))
+    (let* ((err (alist-get "error" got nil nil #'string=))
+           (data (and err (alist-get "data" err nil nil #'string=))))
+      (should err)
+      (should (= (alist-get "code" err nil nil #'string=) -401))
+      (should (string-match-p "Bearer" (alist-get "www-authenticate" data nil nil #'string=))))))
 
 (provide 'acapella-a2a-test)
 ;;; acapella-a2a-test.el ends here

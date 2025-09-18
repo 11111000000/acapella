@@ -40,6 +40,12 @@ Each profile is an alist with keys:
   :type '(repeat (alist :key-type symbol :value-type sexp))
   :group 'acapella)
 
+(defcustom acapella-agent-card-ttl-seconds 300
+  "TTL (in seconds) for cached Agent Cards fetched via HTTP.
+If 0 or negative, caching is effectively disabled."
+  :type 'integer
+  :group 'acapella)
+
 (defvar acapella--current-profile-name nil
   "Name of the currently selected profile, or nil if none.")
 

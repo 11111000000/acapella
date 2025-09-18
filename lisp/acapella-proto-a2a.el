@@ -216,27 +216,74 @@ Prefer explicit (agent-card-url . URL); otherwise derive from :url."
         (when (stringp base)
           (concat (string-remove-suffix "/" base) "/.well-known/agent-card.json")))))
 
+;; Simple in-memory cache for Agent Cards (per base URL)
+(defvar acapella-a2a--agent-card-cache (make-hash-table :test 'equal)
+  "Hash table mapping base URL (string) to a plist:
+  (:fetched FLOAT-TIME :card ALIST).")
+
+(defun acapella-a2a--cache-key (profile)
+  "Return cache key (string) for PROFILE's main :url."
+  (let ((u (cdr (assq 'url profile))))
+    (and (stringp u) u)))
+
+(defun acapella-a2a--cache-get-card (profile)
+  "Return cached Agent Card plist or nil for PROFILE.
+When present, returns plist (:fetched TIME :card ALIST)."
+  (let ((key (acapella-a2a--cache-key profile)))
+    (and key (gethash key acapella-a2a--agent-card-cache))))
+
+(defun acapella-a2a--cache-put-card (profile card)
+  "Store CARD (alist) in cache for PROFILE with current timestamp."
+  (let ((key (acapella-a2a--cache-key profile)))
+    (when key
+      (puthash key (list :fetched (float-time) :card card)
+               acapella-a2a--agent-card-cache))))
+
+(defun acapella-a2a--cache-fresh-p (entry)
+  "Return non-nil if ENTRY (plist) is fresh under TTL."
+  (when entry
+    (let* ((fetched (plist-get entry :fetched))
+           (ttl (or acapella-agent-card-ttl-seconds 0)))
+      (and (numberp fetched)
+           (> ttl 0)
+           (< (- (float-time) fetched) ttl)))))
+
+(defun acapella-a2a--find-header (headers name)
+  "Find header NAME (case-insensitive) in HEADERS alist, return cons or nil."
+  (seq-find (lambda (kv) (string= (downcase (car kv)) (downcase name))) headers))
+
 (defun acapella-a2a-fetch-agent-card (profile on-result)
-  "Fetch Agent Card JSON for PROFILE and call ON-RESULT with parsed alist or error JSON-RPC-like object."
+  "Fetch Agent Card JSON for PROFILE and call ON-RESULT with parsed alist or error JSON-RPC-like object.
+Uses in-memory TTL cache. On HTTP error, returns cached card if available (even if stale)."
   (let* ((card-url (acapella-a2a--agent-card-url profile)))
     (unless card-url
       (user-error "[Acapella] Agent Card URL not configured"))
-    (let ((headers (append '(("Accept" . "application/json"))
-                           (acapella--headers-with-auth profile))))
-      (acapella-transport-http-get
-       card-url headers
-       (lambda (resp)
-         (let ((status (plist-get resp :status))
-               (body   (plist-get resp :body)))
-           (if (and status (>= status 200) (< status 300))
-               (condition-case err
-                   (funcall on-result (acapella-a2a--parse-json body))
-                 (error (funcall on-result `(("jsonrpc" . "2.0")
-                                             ("error" . (("code" . -32700)
-                                                         ("message" . ,(error-message-string err))))))))
-             (funcall on-result `(("jsonrpc" . "2.0")
-                                  ("error" . (("code" . ,(- status))
-                                              ("message" . ,(format "HTTP error %s fetching Agent Card" status)))))))))))))
+    (let* ((cached (acapella-a2a--cache-get-card profile)))
+      (if (acapella-a2a--cache-fresh-p cached)
+          (funcall on-result (plist-get cached :card))
+        (let ((headers (append '(("Accept" . "application/json"))
+                               (acapella--headers-with-auth profile))))
+          (acapella-transport-http-get
+           card-url headers
+           (lambda (resp)
+             (let ((status (plist-get resp :status))
+                   (body   (plist-get resp :body)))
+               (if (and status (>= status 200) (< status 300))
+                   (condition-case err
+                       (let ((card (acapella-a2a--parse-json body)))
+                         (acapella-a2a--cache-put-card profile card)
+                         (funcall on-result card))
+                     (error (funcall on-result `(("jsonrpc" . "2.0")
+                                                 ("error" . (("code" . -32700)
+                                                             ("message" . ,(error-message-string err))))))))
+                 ;; HTTP error: if we have any cached card (even stale), return it; else error
+                 (let* ((cached (acapella-a2a--cache-get-card profile))
+                        (card (plist-get cached :card)))
+                   (if card
+                       (funcall on-result card)
+                     (funcall on-result `(("jsonrpc" . "2.0")
+                                          ("error" . (("code" . ,(- status))
+                                                      ("message" . ,(format "HTTP error %s fetching Agent Card" status)))))))))))))))))
 
 (defun acapella-a2a-select-jsonrpc-url (agent-card &optional fallback-url)
   "Given AGENT-CARD (alist), pick JSONRPC URL per A2A §5.6.
@@ -272,7 +319,7 @@ Fallback to PROFILE :url on error."
 
 (defun acapella-a2a-get-authenticated-card (profile on-result)
   "Fetch authenticated extended Agent Card via JSON-RPC using PROFILE.
-Call ON-RESULT with parsed Agent Card alist or error-shaped object."
+Call ON-RESULT with parsed Agent Card alist or error-shaped object (may include WWW-Authenticate in error.data)."
   (acapella-a2a--with-jsonrpc-url
    profile
    (lambda (url)
@@ -284,17 +331,21 @@ Call ON-RESULT with parsed Agent Card alist or error-shaped object."
        (acapella-transport-http-post
         url headers payload
         (lambda (resp)
-          (let ((status (plist-get resp :status))
-                (body   (plist-get resp :body)))
+          (let ((status  (plist-get resp :status))
+                (body    (plist-get resp :body))
+                (hdrs    (plist-get resp :headers)))
             (if (and status (>= status 200) (< status 300))
                 (condition-case err
                     (funcall on-result (acapella-a2a--parse-json body))
                   (error (funcall on-result `(("jsonrpc" . "2.0")
                                               ("error" . (("code" . -32700)
                                                           ("message" . ,(error-message-string err))))))))
-              (funcall on-result `(("jsonrpc" . "2.0")
-                                   ("error" . (("code" . ,(- status))
-                                               ("message" . ,(format "HTTP error %s fetching Authenticated Card" status))))))))))))))
+              (let* ((wa (cdr (acapella-a2a--find-header hdrs "WWW-Authenticate"))))
+                (funcall on-result
+                         `(("jsonrpc" . "2.0")
+                           ("error" . (("code" . ,(- status))
+                                       ("message" . ,(format "HTTP error %s fetching Authenticated Card" status))
+                                       ,@(when wa `(("data" . (("www-authenticate" . ,wa))))))))))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A2A: Push Notification Config (set/get/list/delete)
