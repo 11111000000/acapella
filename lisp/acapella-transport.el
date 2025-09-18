@@ -72,6 +72,16 @@
         (insert "\n")
         (acapella-transport--traffic-trim!)))))
 
+(defun acapella-transport--log-info (fmt &rest args)
+  "Log INFO-level traffic (shown when level is info or debug)."
+  (when (memq acapella-traffic-log-level '(info debug))
+    (apply #'acapella-transport--traffic-log fmt args)))
+
+(defun acapella-transport--log-debug (fmt &rest args)
+  "Log DEBUG-level traffic (shown only when level is debug)."
+  (when (eq acapella-traffic-log-level 'debug)
+    (apply #'acapella-transport--traffic-log fmt args)))
+
 (defcustom acapella-traffic-max-bytes 262144
   "Maximum size (in bytes) of the traffic buffer.
 When the buffer exceeds this size, older log lines are trimmed."
@@ -266,8 +276,8 @@ Return an SSE handle object."
                (let* ((id (cdr (assq 'id ev)))
                       (data (cdr (assq 'data ev))))
                  (when id (setf (acapella-transport-sse-last-id handle) id))
-                 (acapella-transport--traffic-log "SSE EVENT %s id=%s len=%s"
-                                                  url (or id "nil") (if data (length data) 0))
+                 (acapella-transport--log-debug "SSE EVENT %s id=%s len=%s"
+                                                url (or id "nil") (if data (length data) 0))
                  (when data
                    (funcall on-event (list :id id :data data))))))))
         (set-process-sentinel
@@ -336,8 +346,8 @@ Increments retry counter and resets process/buffer/acc."
            (let* ((id (cdr (assq 'id ev)))
                   (data (cdr (assq 'data ev))))
              (when id (setf (acapella-transport-sse-last-id handle) id))
-             (acapella-transport--traffic-log "SSE EVENT %s id=%s len=%s (reopen)"
-                                              url (or id "nil") (if data (length data) 0))
+             (acapella-transport--log-debug "SSE EVENT %s id=%s len=%s (reopen)"
+                                            url (or id "nil") (if data (length data) 0))
              (when data
                (funcall (acapella-transport-sse-on-event handle) (list :id id :data data))))))))
     (set-process-sentinel

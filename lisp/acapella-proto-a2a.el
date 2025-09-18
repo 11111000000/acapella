@@ -61,9 +61,11 @@ This function will check both :content-type in RESP and the headers alist
     (if (and status (>= status 200) (< status 300))
         (if (and (stringp ctype)
                  (not (string-match-p "application/json" (downcase ctype))))
-            `(("jsonrpc" . "2.0")
-              ("error" . (("code" . -32700)
-                          ("message" . ,(format "Unexpected Content-Type: %s (expected application/json)" ctype)))))
+            (progn
+              (acapella-transport--traffic-log "WARN: 2xx with non-JSON Content-Type: %s" ctype)
+              `(("jsonrpc" . "2.0")
+                ("error" . (("code" . -32700)
+                            ("message" . ,(format "Unexpected Content-Type: %s (expected application/json)" ctype))))))
           (condition-case err
               (funcall on-success
                        (let ((parsed (condition-case perr
@@ -104,32 +106,40 @@ error.data if it's not already present. ERR is an alist like (\"code\" . N) and
            (cons -32601 '("Method not found on server" "Verify method name and server capabilities"))
            (cons -32602 '("Invalid params" "Validate parameter shape and types"))
            (cons -32603 '("Internal error on server" "Server-side error; consider retrying"))
-           ;; A2A domain codes (-32000..-32099)
-           (cons -32001 '("Invalid input (A2A)" "Check message parts and content types"))
-           (cons -32002 '("Unauthorized (A2A)" "Authenticate the client; check tokens/credentials"))
-           (cons -32003 '("Forbidden (A2A)" "Client lacks permission for this action"))
-           (cons -32004 '("Not Found (A2A)" "Referenced resource or task not found"))
-           (cons -32005 '("Conflict (A2A)" "Request conflicts with current state; inspect details"))
-           (cons -32006 '("Rate limited (A2A)" "Backoff and retry later; consider rate limits"))
-           (cons -32007 '("Service unavailable (A2A)" "Temporary outage; try again later"))))
+           ;; A2A domain codes (-32000..-32099) per §8.2
+           (cons -32001 '("Task not found (A2A)" "Verify the task id; it may be invalid, expired, or purged"))
+           (cons -32002 '("Task cannot be canceled (A2A)" "Task is not in a cancelable state or already terminal"))
+           (cons -32003 '("Push notifications not supported (A2A)" "Agent does not support pushNotifications"))
+           (cons -32004 '("Operation not supported (A2A)" "Requested operation is not supported by this agent"))
+           (cons -32005 '("Incompatible content types (A2A)" "Check media types in message parts against agent support"))
+           (cons -32006 '("Invalid agent response type (A2A)" "Server returned an invalid response; report or upgrade"))
+           (cons -32007 '("Authenticated extended card not configured (A2A)" "Server does not provide an authenticated extended card"))))
          (entry (alist-get code mappings)))
     (cond
      ;; Known mapping
      (entry
       (let* ((base (nth 0 entry))
              (hint (nth 1 entry))
+             ;; Heuristic: if the server's message clearly indicates auth issues,
+             ;; label it as Unauthorized regardless of the base mapping.
+             (unauth (and (stringp msg)
+                          (string-match-p "\\(token missing\\|token invalid\\|unauthoriz\\)" (downcase msg))))
+             (base* (if unauth "Unauthorized (A2A)" base))
+             (hint* (if unauth
+                        (or hint "Provide authentication (Authorization header) or configure auth-source")
+                      hint))
              (out (copy-sequence err))
              (new-msg (if (and msg (not (string-empty-p msg)))
-                          (format "%s: %s" base msg)
-                        base))
+                          (format "%s: %s" base* msg)
+                        base*))
              (data (or (alist-get "data" out nil nil #'string=) (list))))
         ;; Ensure error.message is friendly
         (setf (alist-get "message" out nil nil #'string=) new-msg)
         ;; Attach hint under error.data.hint if not present
-        (when (and (stringp hint)
+        (when (and (stringp hint*)
                    (not (assoc "hint" data)))
           (setf (alist-get "data" out nil nil #'string=)
-                (append data (list (cons "hint" hint)))))
+                (append data (list (cons "hint" hint*)))))
         out))
      ;; HTTP mapped negative statuses (we represent as negative codes already)
      ((and (numberp code) (< code 0))

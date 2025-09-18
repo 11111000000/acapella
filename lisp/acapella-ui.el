@@ -95,7 +95,7 @@
 (defun acapella-ui--event-terminal-state (result)
   "Return marker string for RESULT status-update.
 Terminal states return their name when `final' is true.
-Additionally, show \"auth-required\" marker even if not final."
+Additionally, show \"auth-required\" and \"input-required\" markers even if not final."
   (when (string= (acapella-util-jget result "kind") "status-update")
     (let* ((status (acapella-util-jget result "status"))
            (state  (and status (acapella-util-jget status "state")))
@@ -103,6 +103,7 @@ Additionally, show \"auth-required\" marker even if not final."
       (cond
        ((and final (member state '("completed" "canceled" "failed" "rejected"))) state)
        ((string= state "auth-required") "auth-required")
+       ((string= state "input-required") "input-required")
        (t nil)))))
 
 (defun acapella-ui--on-stream-event (obj)
@@ -113,7 +114,10 @@ Additionally, show \"auth-required\" marker even if not final."
     (when (and txt (not (string-empty-p txt)))
       (acapella-ui--append txt))
     (when term
-      (acapella-ui--append-line (format " [%s]" term) 'shadow))))
+      (acapella-ui--append-line (format " [%s]" term) 'shadow)
+      (when (string= term "auth-required")
+        (acapella-ui--append-line
+         "  hint: configure auth-source or check Agent Card securitySchemes" 'shadow)))))
 
 ;;; Interactive commands -------------------------------------------------------
 

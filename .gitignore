@@ -2,3 +2,4 @@ flake.lock
 .context
 .cask
 ...*
+.magptrc
