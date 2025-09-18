@@ -406,5 +406,40 @@
       (acapella-a2a-list-tasks profile nil (lambda (_resp) (setq called t))))
     (should called)))
 
+;; Additional normalization tests for A2A §8.2 codes
+
+(ert-deftest acapella-a2a-normalize-jsonrpc-error-32001 ()
+  "TaskNotFoundError (-32001) should map to friendly message and include a hint."
+  (let* ((err '(("code" . -32001) ("message" . "task does not exist"))))
+    (let* ((norm (acapella-a2a--normalize-jsonrpc-error err))
+           (msg (alist-get "message" norm nil nil #'string=))
+           (data (alist-get "data" norm nil nil #'string=))
+           (hint (and data (alist-get "hint" data nil nil #'string=))))
+      (should (string-match-p "Task not found" msg))
+      (should (string-match-p "task does not exist" msg))
+      (should (stringp hint)))))
+
+(ert-deftest acapella-a2a-normalize-jsonrpc-error-32005 ()
+  "ContentTypeNotSupportedError (-32005) should map to friendly message and include a hint."
+  (let* ((err '(("code" . -32005) ("message" . "media type not supported"))))
+    (let* ((norm (acapella-a2a--normalize-jsonrpc-error err))
+           (msg (alist-get "message" norm nil nil #'string=))
+           (data (alist-get "data" norm nil nil #'string=))
+           (hint (and data (alist-get "hint" data nil nil #'string=))))
+      (should (string-match-p "Incompatible content types" msg))
+      (should (string-match-p "media type not supported" msg))
+      (should (stringp hint)))))
+
+(ert-deftest acapella-a2a-normalize-jsonrpc-error-32007 ()
+  "AuthenticatedExtendedCardNotConfiguredError (-32007) should map to friendly message and include a hint."
+  (let* ((err '(("code" . -32007) ("message" . "not configured"))))
+    (let* ((norm (acapella-a2a--normalize-jsonrpc-error err))
+           (msg (alist-get "message" norm nil nil #'string=))
+           (data (alist-get "data" norm nil nil #'string=))
+           (hint (and data (alist-get "hint" data nil nil #'string=))))
+      (should (string-match-p "Authenticated extended card not configured" msg))
+      (should (string-match-p "not configured" msg))
+      (should (stringp hint)))))
+
 (provide 'acapella-a2a-test)
 ;;; acapella-a2a-test.el ends here
