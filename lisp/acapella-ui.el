@@ -424,6 +424,83 @@ Additionally, show \"auth-required\" marker even if not final."
            (view-mode 1)
            (pop-to-buffer (current-buffer))))))))
 
+(defun acapella-ui--open-base64-artifact (name content-type base64)
+  "Decode BASE64 and show it in a temporary buffer named after NAME.
+If CONTENT-TYPE starts with text/ or is application/json, insert decoded text.
+Otherwise insert raw bytes; this is a minimal safe preview."
+  (let* ((bytes (ignore-errors (base64-decode-string base64)))
+         (buf (get-buffer-create (format "*Acapella Artifact: %s*" (or name "unnamed")))))
+    (unless (stringp base64)
+      (user-error "[Acapella] Invalid base64 artifact"))
+    (unless bytes
+      (user-error "[Acapella] Failed to decode base64 artifact"))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (if (and content-type
+                 (string-match-p "\\`\\(text/\\|application/json\\)" (downcase content-type)))
+            ;; Try to insert as text (utf-8)
+            (insert (decode-coding-string bytes 'utf-8 t))
+          ;; Fallback: insert raw
+          (insert bytes))
+        (goto-char (point-min))
+        (view-mode 1)
+        (pop-to-buffer (current-buffer))))))
+
+;;;###autoload
+(defun acapella-open-artifact-url (url)
+  "Check URL against whitelist and inform user; does not download content (safety-first).
+This is a placeholder for future safe fetching with size limits and mode-specific viewing."
+  (interactive (list (read-string "Artifact URL: ")))
+  (if (not (acapella-domain-allowed-p url))
+      (message "[Acapella] Domain not allowed by whitelist: %s" url)
+    (message "[Acapella] Domain allowed for download: %s (fetching disabled in MVP)" url)))
+
+(defun acapella-ui--open-bytes (name content-type bytes)
+  "Open BYTES in a temporary buffer with NAME and CONTENT-TYPE."
+  (let* ((buf (get-buffer-create (format "*Acapella Artifact: %s*" (or name "download")))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (if (acapella--text-mime-p content-type)
+            (insert (decode-coding-string bytes 'utf-8 t))
+          (insert bytes))
+        (goto-char (point-min))
+        (view-mode 1)
+        (pop-to-buffer (current-buffer))))))
+
+;;;###autoload
+(defun acapella-download-artifact-url (url)
+  "Safely download artifact from URL if allowed and under size limits.
+Respects `acapella-artifact-download-enabled', `acapella-artifact-allowed-domains'
+and `acapella-artifact-max-bytes'. Uses Authorization headers from profile (if any)."
+  (interactive (list (read-string "Artifact URL: ")))
+  (cond
+   ((not acapella-artifact-download-enabled)
+    (message "[Acapella] Artifact downloading disabled by default (see acapella-artifact-download-enabled)"))
+   ((not (acapella-domain-allowed-p url))
+    (message "[Acapella] Domain not allowed by whitelist: %s" url))
+   (t
+    (let* ((profile (acapella-ui--ensure-profile))
+           (headers (acapella--headers-with-auth profile)))
+      (acapella-transport-http-download
+       url headers acapella-artifact-max-bytes
+       (lambda (resp)
+         (let ((status (plist-get resp :status))
+               (ctype  (plist-get resp :content-type))
+               (body   (plist-get resp :body)))
+           (cond
+            ((plist-get resp :too-large)
+             (message "[Acapella] Artifact exceeds max size (%d bytes): %s"
+                      acapella-artifact-max-bytes url))
+            ((and status (>= status 200) (< status 300) (stringp body))
+             (let* ((p (url-generic-parse-url url))
+                    (path (and p (url-filename p)))
+                    (name (and path (file-name-nondirectory path))))
+               (acapella-ui--open-bytes name (or ctype "") body)))
+            (t
+             (message "[Acapella] Download failed (code=%s) for %s" status url))))))))))
+
 (provide 'acapella-ui)
 
 ;;; acapella-ui.el ends here

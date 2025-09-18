@@ -409,6 +409,79 @@ Asynchronous; ON-DONE called in a temporary buffer context."
          (kill-buffer (current-buffer))))
      nil t t)))
 
+(defun acapella-transport--extract-content-length (headers)
+  "Return Content-Length value from HEADERS alist as integer, or nil."
+  (when headers
+    (let ((val (cdr (acapella-util-ci-header-find headers "Content-Length"))))
+      (when (and val (stringp val))
+        (condition-case nil
+            (string-to-number val)
+          (error nil))))))
+
+(defun acapella-transport--http-head (url headers on-done)
+  "Perform HTTP HEAD to URL with HEADERS.
+ON-DONE is called with a plist similar to http-get: (:status CODE :headers H :content-type CT)."
+  (let* ((url-request-method "HEAD")
+         (url-request-extra-headers headers)
+         (url-request-data nil))
+    (acapella-transport--traffic-log "HTTP HEAD %s" url)
+    (url-retrieve
+     url
+     (lambda (status)
+       (let ((code (or (bound-and-true-p url-http-response-status) 0))
+             (hdrs '()))
+         (goto-char (point-min))
+         (when (re-search-forward "\r?\n\r?\n" nil t)
+           (let ((header-region (buffer-substring (point-min) (match-beginning 0))))
+             (setq hdrs (acapella-transport--parse-headers-from-string header-region))))
+         (let ((resp (list :status code
+                           :headers hdrs
+                           :content-type (acapella-transport--extract-content-type hdrs))))
+           (acapella-transport--traffic-log "HTTP HEAD RESP %s code=%s" url code)
+           (funcall on-done resp))
+         (kill-buffer (current-buffer))))
+     nil t t)))
+
+(defun acapella-transport-http-download (url headers max-bytes on-done)
+  "Download content from URL with HEADERS.
+If MAX-BYTES is non-nil and integer, attempt a HEAD first to check Content-Length:
+- if Content-Length > MAX-BYTES, call ON-DONE with (:too-large t ...) and avoid downloading;
+- otherwise perform GET and return full response (or :too-large if actual body exceeds MAX-BYTES).
+
+ON-DONE is called with plist:
+  (:status CODE :headers H :content-type CT :body BYTES :too-large T?)
+
+This keeps behavior compatible with previous implementation when MAX-BYTES is nil."
+  (if (and (integerp max-bytes) (> max-bytes 0))
+      ;; Try HEAD first to avoid downloading large bodies when possible
+      (acapella-transport--http-head
+       url headers
+       (lambda (head-resp)
+         (let ((len (acapella-transport--extract-content-length (plist-get head-resp :headers))))
+           (cond
+            ((and (integerp len) (> len max-bytes))
+             (funcall on-done (append (list :too-large t) head-resp)))
+            (t
+             ;; Proceed with GET; on completion, still guard against actual body size
+             (acapella-transport-http-get
+              url headers
+              (lambda (resp)
+                (let* ((body (plist-get resp :body))
+                       (len2 (and (stringp body) (length body))))
+                  (if (and (integerp max-bytes) len2 (> len2 max-bytes))
+                      (funcall on-done (append (list :too-large t) resp))
+                    (funcall on-done resp))))))))))
+
+    ;; No max specified — behave as before
+    (acapella-transport-http-get
+     url headers
+     (lambda (resp)
+       (let* ((body (plist-get resp :body))
+              (len (and (stringp body) (length body))))
+         (if (and (integerp max-bytes) len (> len max-bytes))
+             (funcall on-done (append (list :too-large t) resp))
+           (funcall on-done resp)))))))
+
 (provide 'acapella-transport)
 
 ;;; acapella-transport.el ends here

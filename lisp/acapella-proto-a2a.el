@@ -89,36 +89,59 @@ This function will check both :content-type in RESP and the headers alist
 ;; JSON-RPC error normalization ------------------------------------------------
 
 (defun acapella-a2a--normalize-jsonrpc-error (err)
-  "Return normalized JSON-RPC ERR alist with friendlier message for known codes."
+  "Return normalized JSON-RPC ERR alist with friendlier message and optional hints.
+For known A2A and JSON-RPC codes provide a clearer message and add hint text in
+error.data if it's not already present. ERR is an alist like (\"code\" . N) and
+(\"message\" . \"...\"). Return a modified copy of ERR (alist)."
   (let* ((code (alist-get "code" err nil nil #'string=))
          (msg  (alist-get "message" err nil nil #'string=))
-         (friendly
-          (cond
-           ((eq code -32700) "Malformed JSON received from server")
-           ((eq code -32600) "Invalid JSON-RPC request")
-           ((eq code -32601) "Method not found on server")
-           ((eq code -32602) "Invalid params")
-           ((eq code -32603) "Internal error on server")
-           ;; A2A typical domain codes (-32000..-32099)
-           ((eq code -32001) "Invalid input (A2A)")
-           ((eq code -32002) "Unauthorized (A2A)")
-           ((eq code -32003) "Forbidden (A2A)")
-           ((eq code -32004) "Not Found (A2A)")
-           ((eq code -32005) "Conflict (A2A)")
-           ((eq code -32006) "Rate limited (A2A)")
-           ((eq code -32007) "Service unavailable (A2A)")
-           ;; HTTP mapped as negative status
-           ((and (numberp code) (< code 0))
-            (format "HTTP error %d" (- code)))
-           (t nil))))
-    (if friendly
-        (let ((out (copy-sequence err)))
-          (setf (alist-get "message" out nil nil #'string=)
-                (if (and msg (not (string-empty-p msg)))
-                    (format "%s: %s" friendly msg)
-                  friendly))
-          out)
-      err)))
+         ;; Friendly message base and hints per code (A2A §8.2 and JSON-RPC common)
+         (mappings
+          (list
+           ;; JSON-RPC generic
+           (cons -32700 '("Malformed JSON received from server" "Ensure the server returns valid JSON"))
+           (cons -32600 '("Invalid JSON-RPC request" "Check the request envelope for required fields"))
+           (cons -32601 '("Method not found on server" "Verify method name and server capabilities"))
+           (cons -32602 '("Invalid params" "Validate parameter shape and types"))
+           (cons -32603 '("Internal error on server" "Server-side error; consider retrying"))
+           ;; A2A domain codes (-32000..-32099)
+           (cons -32001 '("Invalid input (A2A)" "Check message parts and content types"))
+           (cons -32002 '("Unauthorized (A2A)" "Authenticate the client; check tokens/credentials"))
+           (cons -32003 '("Forbidden (A2A)" "Client lacks permission for this action"))
+           (cons -32004 '("Not Found (A2A)" "Referenced resource or task not found"))
+           (cons -32005 '("Conflict (A2A)" "Request conflicts with current state; inspect details"))
+           (cons -32006 '("Rate limited (A2A)" "Backoff and retry later; consider rate limits"))
+           (cons -32007 '("Service unavailable (A2A)" "Temporary outage; try again later"))))
+         (entry (alist-get code mappings)))
+    (cond
+     ;; Known mapping
+     (entry
+      (let* ((base (nth 0 entry))
+             (hint (nth 1 entry))
+             (out (copy-sequence err))
+             (new-msg (if (and msg (not (string-empty-p msg)))
+                          (format "%s: %s" base msg)
+                        base))
+             (data (or (alist-get "data" out nil nil #'string=) (list))))
+        ;; Ensure error.message is friendly
+        (setf (alist-get "message" out nil nil #'string=) new-msg)
+        ;; Attach hint under error.data.hint if not present
+        (when (and (stringp hint)
+                   (not (assoc "hint" data)))
+          (setf (alist-get "data" out nil nil #'string=)
+                (append data (list (cons "hint" hint)))))
+        out))
+     ;; HTTP mapped negative statuses (we represent as negative codes already)
+     ((and (numberp code) (< code 0))
+      (let* ((out (copy-sequence err))
+             (http-code (- code)))
+        (setf (alist-get "message" out nil nil #'string=)
+              (format "HTTP error %d%s"
+                      http-code
+                      (if (and msg (not (string-empty-p msg))) (format ": %s" msg) "")))
+        out))
+     ;; Fallback: return original
+     (t err))))
 
 (defun acapella-a2a--normalize-jsonrpc (obj)
   "Normalize JSON-RPC OBJ alist: map error codes to friendly messages."

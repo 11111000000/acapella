@@ -14,6 +14,7 @@
 
 (require 'auth-source)
 (require 'subr-x)
+(require 'url-parse)
 (require 'acapella-util)
 
 (defgroup acapella nil
@@ -114,6 +115,47 @@ If 0 or negative, caching is effectively disabled."
 (defun acapella--mask-header (name value)
   "Return masked VALUE for header NAME for logging (delegates to util)."
   (acapella-util-mask-header name value))
+
+(defcustom acapella-artifact-allowed-domains '("localhost" "127.0.0.1")
+  "List of hostnames allowed for downloading artifacts from content_url.
+Use nil to disallow all external downloads."
+  :type '(repeat string)
+  :group 'acapella)
+
+(defcustom acapella-artifact-max-bytes 1048576
+  "Maximum size (in bytes) allowed to download for a single artifact.
+If the remote declares larger size or the response exceeds this, refuse to fetch."
+  :type 'integer
+  :group 'acapella)
+
+(defcustom acapella-artifact-download-enabled nil
+  "When non-nil, allow downloading artifacts from whitelisted domains.
+MVP safeguard: disabled by default."
+  :type 'boolean
+  :group 'acapella)
+
+(defcustom acapella-artifact-text-mime-prefixes '("text/" "application/json")
+  "MIME type prefixes considered textual for artifact preview."
+  :type '(repeat string)
+  :group 'acapella)
+
+(defun acapella--text-mime-p (content-type)
+  "Return non-nil if CONTENT-TYPE should be treated as text for preview."
+  (and (stringp content-type)
+       (let ((ct (downcase content-type)))
+         (seq-some (lambda (pfx) (string-prefix-p pfx ct))
+                   acapella-artifact-text-mime-prefixes))))
+
+(defun acapella-domain-allowed-p (url)
+  "Return non-nil if URL hostname is in `acapella-artifact-allowed-domains'."
+  (when (and (stringp url) (not (string-empty-p url)))
+    (condition-case _
+        (let* ((u (url-generic-parse-url url))
+               (host (and u (url-host u))))
+          (and host
+               (member (downcase host)
+                       (mapcar #'downcase acapella-artifact-allowed-domains))))
+      (error nil))))
 
 (provide 'acapella-config)
 
