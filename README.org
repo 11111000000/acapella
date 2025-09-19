@@ -5,7 +5,7 @@
 * Acapella in one paragraph
 Acapella is an Emacs package that lets you talk to AI agents through the open A2A protocol (JSON-RPC over HTTP + SSE streaming). It provides a small, composable, testable core with an Emacs-first UI: send or stream messages, manage long-running tasks (get/cancel/resubscribe/list), preview artifacts safely, and observe everything in a traffic buffer with structured logs.
 
-* Why this exists (epistemology and philosophy)
+* Why this exists 
 - Emptiness before form. The utility of a vessel is in its emptiness: Acapella keeps a functional core minimal and open, so different protocols and servers can “pour” their content without changing the vessel. We model only the essentials: Message, Task, Artifact, Event.
 - Do less, do right. Functional core + imperative shell: leave networking, processes and buffers at the edges; keep logic pure and small. Easy to reason about, easy to test.
 - Transparency over mystery. HTTP/JSON/SSE are text. You can inspect traffic, validate headers, log errors, replay inputs. No opaque black box.
